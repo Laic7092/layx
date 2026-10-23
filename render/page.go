@@ -132,7 +132,9 @@ func (l *Layout) renderPage(n int) *Page {
 			runs, _ := buildLine(w, it)
 			for j := range runs {
 				runs[j].X += dx
-				runs[j].Y += dy
+				// buildLine returns baselines relative to the line box, so the
+				// line's own offset within the chapter flow has to be added.
+				runs[j].Y += dy + it.y
 				p.ops = append(p.ops, drawOp{kind: opGlyphs, run: runs[j]})
 			}
 			for si := range it.para.segs {

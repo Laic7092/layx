@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+# Build the wasm binary and stage the browser assets.
+#
+#   ./examples/wasm/build.sh            # auto-detect a font
+#   LAYX_FONT=/path/to/font.ttf ./examples/wasm/build.sh
+set -euo pipefail
+
+here="$(cd "$(dirname "$0")" && pwd)"
+root="$(cd "$here/../.." && pwd)"
+out="$here/web"
+
+mkdir -p "$out/fonts"
+
+echo "==> go build (js/wasm)"
+GOOS=js GOARCH=wasm go build -trimpath -ldflags="-s -w" -o "$out/layx.wasm" "$here"
+
+goroot="$(go env GOROOT)"
+cp "$goroot/lib/wasm/wasm_exec.js" "$out/wasm_exec.js"
+cp "$goroot/lib/wasm/wasm_exec_node.js" "$out/wasm_exec_node.js"
+
+font="${LAYX_FONT:-}"
+if [ -z "$font" ]; then
+  for candidate in \
+    "$HOME/.local/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc" \
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc" \
+    "/usr/share/fonts/google-noto-cjk/NotoSansCJK-Regular.ttc" \
+    "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc" \
+    "/System/Library/Fonts/NotoSansCJK-Regular.ttc" \
+    "$root/render/testdata/DejaVuSerif.ttf"; do
+    if [ -f "$candidate" ]; then
+      font="$candidate"
+      break
+    fi
+  done
+fi
+
+if [ -z "$font" ] || [ ! -f "$font" ]; then
+  echo "error: no font found; set LAYX_FONT to a .ttf/.otf/.ttc file" >&2
+  exit 1
+fi
+
+cp "$font" "$out/fonts/book.font"
+echo "==> font: $font"
+echo "==> wasm: $(du -h "$out/layx.wasm" | cut -f1), font: $(du -h "$out/fonts/book.font" | cut -f1)"
+echo "==> serve: go run ./examples/wasm/server  (or: python3 -m http.server -d $out 8088)"

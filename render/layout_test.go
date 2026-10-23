@@ -554,3 +554,55 @@ func TestAnchorOnlyLocation(t *testing.T) {
 		t.Fatal("anchor-only selection returned no quads")
 	}
 }
+
+// TestPageGlyphBaselines guards against display lists that forget to offset a
+// line's baseline by the line's position inside the flow (which used to draw
+// every line of a paragraph on top of the first one).
+func TestPageGlyphBaselines(t *testing.T) {
+	doc := testDocument(t, "")
+	l := testLayout(t, doc, 2)
+
+	maxBaselines := 0
+	for pn := 0; pn < l.PageCount(); pn++ {
+		p := l.Page(pn)
+		if p == nil {
+			t.Fatalf("page %d is nil", pn)
+		}
+		info := &l.pages[pn]
+		cf := &l.chapters[info.chapter]
+
+		var want []float32
+		for i := info.first; i < info.last && i < len(cf.items); i++ {
+			it := &cf.items[i]
+			if it.kind != itemLine {
+				continue
+			}
+			want = append(want, l.opts.Margins.Top-info.top+it.y+it.baseline)
+		}
+
+		seen := make(map[float32]bool)
+		for _, op := range p.ops {
+			if op.kind != opGlyphs {
+				continue
+			}
+			y := op.run.Y
+			found := false
+			for _, w := range want {
+				if d := y - w; d < 0.5 && d > -0.5 {
+					found = true
+					break
+				}
+			}
+			if !found {
+				t.Fatalf("page %d: glyph run baseline %.2f does not match any line baseline", pn, y)
+			}
+			seen[float32(int(y*2+0.5))/2] = true
+		}
+		if len(seen) > maxBaselines {
+			maxBaselines = len(seen)
+		}
+	}
+	if maxBaselines < 2 {
+		t.Fatalf("expected multiple baselines across pages, got %d", maxBaselines)
+	}
+}
