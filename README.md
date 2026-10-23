@@ -16,7 +16,10 @@ XHTML / 选择器 / 级联                ↓
 
 已实现：分页与滚动两条输出路径、三层布局缓存、shaped 行缓存、tile 缓存、
 命中测试/跨页选区/锚点映射、CJK 断行与标点政策、可插拔断字、边框/背景/文字装饰。
-设计取舍见 [`docs/design.md`](docs/design.md)。
+设计取舍见 [`docs/design.md`](docs/design.md)，与 Chromium 逐行比对的标点/断行规则见
+[`docs/text-rules.md`](docs/text-rules.md)，为什么用 Go 而不是 Rust 见
+[`docs/language-choice.md`](docs/language-choice.md)（实测：大小/内存 Rust 明显赢，
+原生速度只差 1.33×）。
 
 ## 包结构
 
