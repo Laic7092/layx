@@ -93,8 +93,8 @@ Typography: render.Typography{
         PunctuationCompression: true,  // 成对引号收半宽，与 Chrome 默认逐行一致
         HangingPunctuation:     false, // 行末标点探出；浏览器默认不悬挂，默认关
         Autospacing:            false, // 中西文 1/8 em；Chrome 不加，混排想对齐浏览器就关
-        Widows:                 2,     // 0 = 不保护
-        Orphans:                2,     // 0 = 不保护
+        Widows:                 2,     // CSS 初始值；要填满整页就写 1
+        Orphans:                2,     // 同上，1 是最小合法值
     },
 },
 // 首行缩进属于文档样式，不在 Typography 上：
@@ -291,11 +291,9 @@ Noto 路径，找不到则跳过（可用 `LAYX_CJK_FONT` / `LAYX_CJK_FONT_INDEX
   因为 Chromium 在这套字体上也没压它们。悬挂允许行末收尾标点探出内容盒至多
   半个字宽，且只在关闭断字时生效（行尾悬挂会改变换行位置，因此参与 `BreakKey`）。
 - 两端对齐会把余量分给空格和 CJK 字间隙；标点相邻的间隙按半权重参与。
-- **两个默认值是故意偏离旧行为的**（`docs/text-rules.md` 的决策）：
-  `Typography.Rules.Widows` / `Orphans` 的零值现在是"关闭"，不再提升为 2/2；
-  `Autospacing`（中西文 1/8 em）默认 off。需要旧行为就显式赋值：孤行/寡行写
-  `Widows: 2, Orphans: 2`，中西文间距写 `Autospacing: true`。golden 里凡是含
-  中西混排或依赖 2/2 分页的布局都会随这两条变化，测试已改为显式传值。
+- **`Autospacing`（中西文 1/8 em）默认 off**，因为它来自 CLREQ 的建议而不是
+  CSS 初始值。`Widows` / `Orphans` 的零值仍按 CSS 初始值提升为 2/2（0 在 CSS
+  里不是合法值），想要"填满页面、不做孤寡行保护"就写 `1`。
 - `keep-with-next`（标题不与正文分离）尚未实现，只有 `KeepTogether` 与
   `break-before/after`。
 - 行高 / 段间距变化走 `Layout.Relayout` 的变体缓存（500 万字约 22ms）；但

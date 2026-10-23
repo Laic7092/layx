@@ -43,7 +43,7 @@
 | `HangingPunctuation`（行末悬挂） | **off** | CSS Text L4 `hanging-punctuation` | BreakKey |
 | `JustifyStrategy` | 只分配空格 | CSS Text L3 §7.3 | 绘制期，不影响断行 |
 | `ParagraphGap` | `0` | CSS 由样式给 margin，引擎不自作主张 | PageKey |
-| `Widows` / `Orphans` | **关闭** | CSS Fragmentation L3 §4.4；浏览器多不实现 | 只影响分页，但随 `TextRules` 整体进 BreakKey |
+| `Widows` / `Orphans` | **2**（CSS 初始值；`1` = 不保护） | CSS Fragmentation L3 §4.4 | 只影响分页，但随 `TextRules` 整体进 BreakKey |
 
 几点说明：
 
@@ -62,8 +62,9 @@
   自己比浏览器多知道一层“字体是否支持压缩”。
 - `Autospacing`（1/8 em）曾经是无条件执行的，与"零值 = 规范默认"冲突；现在由
   `TextRules.Autospacing` 驱动，默认 off。
-- `Widows` / `Orphans` 的零值就是"关闭"：`Typography.withDefaults()` 不再把 0
-  提升为 2/2，浏览器本来也不实现这两条保护。
+- `Widows` / `Orphans` 的零值是"未设置"，`Typography.withDefaults()` 把它提升为
+  CSS 初始值 2/2。CSS 只接受正整数，所以"不保护"的正确写法是 `1`，不是 `0`：
+  让 0 表示关闭会造出"零值 ≠ 规范默认"的例外，而填满页面本来就是用 1 表达的。
 - `FirstLineIndent` 只存在于每个节点的 `Style` 上，`Typography` 不提供默认值：
   首行缩进属于文档样式，引擎不注入。
 
@@ -120,7 +121,7 @@
 
 | 差异点 | 规范 | 浏览器 | 我们的选择 |
 |---|---|---|---|
-| `widows` / `orphans` | CSS Fragmentation 3 §4.4 定义 | Chromium 长期未在 multicol 中实现 | 跟规范，默认关闭 |
+| `widows` / `orphans` | CSS Fragmentation 3 §4.4 定义，初始值 2 | Chromium 长期未在 multicol 中实现 | 跟规范：零值按 2 处理，`1` 为等效关闭 |
 | margin collapsing 边界情况 | CSS 2.1 §8.3.1 | 各家实现有细节差异 | 跟规范 |
 | `text-spacing-trim` | CSS Text L4 定义字符类，成对标点各收半宽 | 按字体是否支持压缩决定行为；同一字体上可能只压一部分标点 | 开关默认 off；打开后按 linecmp 量到的浏览器行为（引号类）压缩 |
 
@@ -130,12 +131,13 @@
 |---|---|---|
 | 标点挤压与行末悬挂 | **拆成两个独立开关** | 规范来源不同（`text-spacing-trim` vs `hanging-punctuation`），对断行的影响也不同 |
 | `Autospacing` 默认 | **off** | 它来自 CLREQ 的建议，不是 CSS 初始值；默认开启会让"零值 = 规范默认"失效 |
-| `Widows` / `Orphans` 零值 | **关闭（0 即不启用保护）** | 对齐浏览器实际行为；需要保护的宿主显式给值 |
+| `Widows` / `Orphans` 零值 | **按 CSS 初始值提升为 2/2** | "零值 = 规范默认"不能在这里破例；不保护用合法值 `1` 表达 |
 | 中文首行缩进 2em | **完全交给样式，核心不提供默认值** | 首行缩进是文档排版决策，不该由引擎注入；`Typography` 不新增该字段 |
 
 ## 实施状态
 
-五条待办已完成：`Widows`/`Orphans` 零值即关闭、`Autospacing` 改由开关驱动并
+五条待办已完成：`Widows`/`Orphans` 零值按规范提升为 2/2（`1` 为关闭）、
+`Autospacing` 改由开关驱动并
 默认 off、依赖旧默认值的测试改为显式传值、`TextRules` 收口并整体哈希进
 `BreakKey`（含穷举/反向测试）、`examples/` 显式设置 `FirstLineIndent` 且 README
 给出中文小说推荐开关组。

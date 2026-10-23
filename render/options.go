@@ -102,9 +102,9 @@ func (t Typography) withDefaults() Typography {
 	if t.Color.Transparent() {
 		t.Color = paint.Color{R: 0, G: 0, B: 0, A: 0xff}
 	}
-	// Rules is intentionally left alone: its zero value is already the spec
-	// default. In particular a zero Widows/Orphans disables the protection
-	// instead of being lifted to the old 2/2.
+	// Rules pads widows and orphans to their CSS initial value; everything
+	// else in it is already zero when unset (no optional typography).
+	t.Rules = t.Rules.withDefaults()
 	return t
 }
 

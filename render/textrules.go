@@ -22,8 +22,24 @@ type TextRules struct {
 	// CSS Text L4 hanging-punctuation: allow-end. It changes line breaking.
 	HangingPunctuation bool
 	// Widows and Orphans are the minimum number of lines of a paragraph left
-	// at the top and bottom of a page. Zero disables the protection, matching
-	// CSS Fragmentation L3, which browsers largely do not implement either.
+	// at the top and bottom of a page. Their zero value means "unset", not
+	// "off": the CSS initial value is 2, so an unset field pads up to 2 in
+	// withDefaults. CSS requires a positive integer, so 1 is how a host asks
+	// for pages to be filled without the protection.
 	Widows  int
 	Orphans int
+}
+
+// withDefaults lifts unset widows and orphans to the CSS initial value. Zero
+// is not a legal CSS value, so a zero field cannot mean "no protection": use 1
+// for that. Keeping the padding here rather than in each caller means the
+// paginator, the cache key and the tests all see the same numbers.
+func (r TextRules) withDefaults() TextRules {
+	if r.Widows <= 0 {
+		r.Widows = 2
+	}
+	if r.Orphans <= 0 {
+		r.Orphans = 2
+	}
+	return r
 }

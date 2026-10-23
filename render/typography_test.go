@@ -230,10 +230,13 @@ func TestAutospacingOffByDefault(t *testing.T) {
 
 // TestTypographyKeepsZeroRules proves withDefaults does not lift the policy
 // zeros: 0 widows/orphans means "off", not "2".
-func TestTypographyKeepsZeroRules(t *testing.T) {
+func TestTypographyZeroRules(t *testing.T) {
 	got := Typography{}.withDefaults()
-	if got.Rules.Widows != 0 || got.Rules.Orphans != 0 {
-		t.Fatalf("withDefaults lifted zero rules to %+v", got.Rules)
+	// Widows and orphans have a CSS initial value of 2, so an unset field is
+	// padded to it. 1 is how a host turns the protection off; zero is not a
+	// legal CSS value and must not be read as "off".
+	if got.Rules.Widows != 2 || got.Rules.Orphans != 2 {
+		t.Fatalf("withDefaults did not pad widows/orphans to the spec default: %+v", got.Rules)
 	}
 	if got.Rules.Autospacing || got.Rules.PunctuationCompression || got.Rules.HangingPunctuation {
 		t.Fatalf("withDefaults enabled an opt-in policy: %+v", got.Rules)

@@ -1049,6 +1049,7 @@ func markNodeFirst(cf *chapterFlow, parents map[NodeID]NodeID, node NodeID, idx 
 // paginate slices a flowed chapter into pages. Page top values are absolute
 // chapter content coordinates.
 func paginate(ctx context.Context, items []flowItem, pageHeight float32, typo Typography) []pageInfo {
+	typo.Rules = typo.Rules.withDefaults()
 	if len(items) == 0 {
 		return []pageInfo{{chapter: 0, first: 0, last: 0, top: 0}}
 	}
@@ -1091,8 +1092,9 @@ func paginate(ctx context.Context, items []flowItem, pageHeight float32, typo Ty
 				breakAt = start
 			}
 		}
-		// Widows and orphans only apply when the break is inside a paragraph,
-		// and only when the policy asks for protection: zero means off.
+		// Widows and orphans only apply when the break is inside a paragraph.
+		// Both counts are at least 1 here: paginate padded unset fields to the
+		// CSS initial value, and a block-level zero fell back to those above.
 		if breakAt == i && it.para != nil && it.paraLine > 0 {
 			orphans := it.orphans
 			if orphans <= 0 {
@@ -1104,12 +1106,12 @@ func paginate(ctx context.Context, items []flowItem, pageHeight float32, typo Ty
 			}
 			pl := int(it.paraLine)
 			total := int(it.paraLines)
-			if orphans > 0 && pl < orphans {
+			if pl < orphans {
 				start := i - pl
 				if start > first {
 					breakAt = start
 				}
-			} else if remain := total - pl; widows > 0 && remain < widows {
+			} else if remain := total - pl; remain < widows {
 				cand := i + (widows - remain)
 				if cand > i && cand <= len(items) &&
 					items[cand-1].y+items[cand-1].height <= limit+eps {
