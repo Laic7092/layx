@@ -221,6 +221,13 @@ Noto 路径，找不到则跳过（可用 `LAYX_CJK_FONT` / `LAYX_CJK_FONT_INDEX
 - 分页暂按行边界；复杂 `break-inside` 与跨页图片策略仍需细化。
 - 背景色、主题色由宿主通过 `Typography.Background` / `Style.Color` 提供，绘制后端自行决定。
 - 当前不做 fixed-layout / 脚本化 EPUB；按设计应走 WebView fallback。
+- 与浏览器的差距，分三类：**能补没补** —— 边框/背景、下划线、`word-spacing`、
+  断字、标点挤压/悬挂、脚注、合成粗体；**不做（走回退）** —— 表格、flex/grid、
+  竖排、ruby、transform、脚本；**有未知偏差** —— A/B 里总行数比 Chrome 多 27%，
+  原因未查清（可能是断行或字宽，不是分页）。
+- 性能上：单核与 Blink 打平（500 万字 1.54s vs 外推 1.41s），8 核快 3–5×，
+  改行高快一个数量级；shaping 用 go-text（HarfBuzz 的 Go 移植），单核上限低于
+  Blink；滚动/翻页的合成优势在宿主，核心只提供 tile DisplayList。
 
 ## 许可
 
