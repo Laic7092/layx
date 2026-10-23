@@ -7,8 +7,10 @@ package main
 import (
 	"compress/gzip"
 	"flag"
+	"io"
 	"log"
 	"net/http"
+	"os"
 	"strings"
 )
 
@@ -18,7 +20,21 @@ func main() {
 	flag.Parse()
 
 	fs := http.FileServer(http.Dir(*dir))
+	abOut := os.Getenv("LAYX_AB_OUT")
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if abOut != "" && r.Method == http.MethodPost && r.URL.Path == "/__ab" {
+			body, err := io.ReadAll(io.LimitReader(r.Body, 8<<20))
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			if err := os.WriteFile(abOut, body, 0o644); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
 		switch {
 		case strings.HasSuffix(r.URL.Path, ".wasm"):
 			w.Header().Set("Content-Type", "application/wasm")

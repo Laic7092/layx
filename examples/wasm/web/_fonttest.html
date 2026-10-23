@@ -1,0 +1,17 @@
+<!doctype html><meta charset="utf-8"><pre id="r">start</pre>
+<script>
+(async () => {
+  const log = [];
+  try {
+    const resp = await fetch('fonts/book.font');
+    log.push('fetch ' + resp.status + ' ' + resp.headers.get('content-encoding') + ' ' + resp.headers.get('content-length'));
+    const buf = await resp.arrayBuffer();
+    log.push('bytes ' + buf.byteLength);
+    const face = new FontFace('book', buf);
+    await face.load();
+    document.fonts.add(face);
+    log.push('fontface ok');
+  } catch (e) { log.push('ERR ' + e.name + ': ' + e.message); }
+  document.getElementById('r').textContent = log.join('\n');
+})();
+</script>

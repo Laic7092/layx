@@ -139,6 +139,19 @@ cat snapshots/index.md                   # 阶段元数据 + 图片 + 像素差�
 也可以用 `CHROME=/path/to/chrome` 指定）。对比图是左右并排 + 差异热力图，
 统计输出形如 `changed_pct=6.58 mean_abs_diff=6.988`。
 
+## 与 WebView 的 A/B
+
+`scripts/ab.sh` 在同一个 Chromium 里跑两条路径：`native`（layx 编译成 wasm）
+和 `webview`（DOM + CSS multi-column），语料、viewport、字体、字号、页边距完全一致。
+
+```sh
+./scripts/ab.sh m1 --chars 200000 --turns 100 --repeat 3
+```
+
+输出表格并写 `snapshots/ab/m1.json`（gitignored）。覆盖：首页耗时、整书布局、
+冷/热翻页 p50/p99、字号重排、行高重分页、内存。尚未覆盖：应用冷启动、
+进程树 RSS、滚动掉帧、多线程 native（wasm 只有 GOMAXPROCS=1）。
+
 ## 测试
 
 ```sh

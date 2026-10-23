@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>layx A/B</title>
+<style>
+  html, body { margin: 0; padding: 0; background: #faf8f3; overflow: hidden; }
+  canvas { display: none; }
+  #book {
+    position: absolute;
+    margin: 0;
+    padding: 0;
+    box-sizing: content-box;
+    font-family: book, serif;
+    text-align: justify;
+    hyphens: manual;
+    word-break: normal;
+  }
+  #book p { margin: 0; text-indent: 2em; }
+  #result { position: absolute; left: -10000px; }
+</style>
+</head>
+<body>
+<div id="book"></div>
+<canvas id="page"></canvas>
+<canvas id="overlay"></canvas>
+<pre id="result"></pre>
+<script src="wasm_exec.js"></script>
+<script src="ab.js"></script>
+</body>
+</html>

@@ -28,6 +28,8 @@ if [ -z "$font" ]; then
     "/usr/share/fonts/google-noto-cjk/NotoSansCJK-Regular.ttc" \
     "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc" \
     "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc" \
+    "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf" \
+    "/usr/share/fonts/truetype/fonts-japanese-gothic.ttf" \
     "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc" \
     "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc" \
     "/usr/share/fonts/truetype/arphic/uming.ttc" \

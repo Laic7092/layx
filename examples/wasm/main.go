@@ -678,6 +678,17 @@ func (w *jsonWriter) num(f float64) {
 	w.buf = strconv.AppendFloat(w.buf, f, 'f', -1, 64)
 }
 
+func (w *jsonWriter) numbers(v []float64) {
+	w.raw("[")
+	for i, f := range v {
+		if i > 0 {
+			w.raw(",")
+		}
+		w.num(f)
+	}
+	w.raw("]")
+}
+
 func (w *jsonWriter) boolean(b bool) {
 	if b {
 		w.raw("true")
@@ -737,6 +748,26 @@ func (w *jsonWriter) value(v any) {
 		w.raw(`,"ms":`)
 		w.num(t.MS)
 		w.raw("}")
+	case benchResult:
+		w.raw(`{"pages":`)
+		w.integer(int64(t.Pages))
+		w.raw(`,"buildMs":`)
+		w.num(t.BuildMS)
+		w.raw(`,"layoutMs":`)
+		w.num(t.LayoutMS)
+		w.raw(`,"coldMs":`)
+		w.numbers(t.ColdMS)
+		w.raw(`,"hotMs":`)
+		w.numbers(t.HotMS)
+		w.raw(`,"reflowMs":`)
+		w.num(t.ReflowMS)
+		w.raw(`,"repageMs":`)
+		w.num(t.RepageMS)
+		w.raw(`,"memSys":`)
+		w.integer(int64(t.MemSys))
+		w.raw("}")
+	case []float64:
+		w.numbers(t)
 	case selectionResult:
 		w.raw(`{"ok":`)
 		w.boolean(t.OK)
@@ -831,6 +862,8 @@ func main() {
 		}
 		return map[string]any{"ok": true, "hit": pointOf(loc)}, nil
 	})
+
+	registerBench(api)
 
 	export(api, "linkAt", func(args []js.Value) (any, error) {
 		if err := need(args, 2); err != nil {

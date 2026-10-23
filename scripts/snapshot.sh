@@ -76,7 +76,8 @@ if [ "$compare_only" = 0 ]; then
   [ "$build" = 1 ] && ./examples/wasm/build.sh
   mkdir -p "$out"
 
-  (go run ./examples/wasm/server -addr "127.0.0.1:$port" -dir examples/wasm/web >"$tmpbin/server.log" 2>&1) &
+  go build -o "$tmpbin/server" ./examples/wasm/server
+  ("$tmpbin/server" -addr "127.0.0.1:$port" -dir examples/wasm/web >"$tmpbin/server.log" 2>&1) &
   server_pid=$!
   for _ in $(seq 1 100); do
     curl -fsS -o /dev/null "http://127.0.0.1:$port/shot.html" 2>/dev/null && break
