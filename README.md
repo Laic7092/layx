@@ -259,11 +259,15 @@ Noto 路径，找不到则跳过（可用 `LAYX_CJK_FONT` / `LAYX_CJK_FONT_INDEX
 - 页面背景与主题色由 `Typography.Background` / `Typography.Color` 提供；块背景、
   边框与文字装饰由 `Style.Background` / `Style.Border*` / `Style.TextDecoration`
   提供，绘制后端自行决定。
-- 当前不做 fixed-layout / 脚本化 EPUB；按设计应走 WebView fallback。
-- 与浏览器的差距，分三类：**已补齐** —— 边框/背景/圆角、下划线与删除线、
+- fixed-layout / 脚本化 EPUB 不在 IR 的表达范围内：核心只接受已解析、可重排的
+  `Document`，这类内容的处置是宿主的事。
+- 与浏览器的差距：**已补齐** —— 边框/背景/圆角、下划线与删除线、
   `word-spacing`、合成粗体标记、可插拔断字（`render/hyphen/en` 内置 TeX
-  英文模式）；**能补没补** —— 标点挤压/悬挂（影响已量化，见 linecmp 一节）、脚注；
-  **不做（走回退）** —— 表格、flex/grid、竖排、ruby、transform、脚本。
+  英文模式）；**能补没补** —— 标点挤压/悬挂（影响已量化，见 linecmp 一节）、表格、
+  脚注；**IR 不表达** —— flex/grid、竖排、ruby、transform、脚本。
+  “IR 不表达”只说明核心不认识这些结构，不说明宿主该怎么办：那是宿主的决定。
+  核心的责任是把“这个文档里有我表达不了的东西”报告出来，而不是默默丢掉或
+  自行降级——参见下面的“诊断”。
 - 早先记的“A/B 里总行数比 Chrome 多 27%”是测量错误，已查清并修掉：语料里那段
   纯英文用的是 Droid Sans Fallback，它没有拉丁字形，native 画 `.notdef`、浏览器
   换字体，两边量的不是同一段文字。加上字体覆盖探测后同一份 A/B 的页数是 61 vs 63
