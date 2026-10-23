@@ -137,6 +137,10 @@ type LayoutOptions struct {
 	// TileHeight is the height of a scroll tile in content pixels. Zero uses
 	// Viewport.Height. It is ignored in paged mode.
 	TileHeight float32
+	// Hyphenator supplies intra-word break points for blocks whose style sets
+	// Hyphenate. Nil disables hyphenation, and the zero value keeps the old
+	// line breaking. Its Name participates in BreakKey.
+	Hyphenator Hyphenator
 }
 
 func (o LayoutOptions) validate() (LayoutOptions, error) {

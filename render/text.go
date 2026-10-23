@@ -29,6 +29,13 @@ type paragraph struct {
 	segs []paraSeg
 	// style is the block style that supplies alignment and indentation.
 	style Style
+	// hyphPoints are original rune indexes where a hyphen may be appended
+	// when a line breaks there. They are populated only when the block enables
+	// hyphenation; nil means the line breaker may never add a hyphen.
+	hyphPoints []int32
+	// hyphAdv stores the measured advance of each synthetic hyphen (including
+	// letter spacing) so drawing matches the width used for line breaking.
+	hyphAdv map[int32]float32
 }
 
 func (p *paragraph) segAt(off int) *paraSeg {
@@ -52,6 +59,7 @@ type textWorker struct {
 	fs          *FontSet
 	typo        Typography
 	defaultLang language.Language
+	hyphenator  Hyphenator
 	faces       []*font.Face
 	refs        []*paint.Font
 	orders      map[fontKey][]int
@@ -66,16 +74,17 @@ type fontKey struct {
 	slant  Slant
 }
 
-func newTextWorker(fs *FontSet, typo Typography) *textWorker {
+func newTextWorker(fs *FontSet, typo Typography, hyphenator Hyphenator) *textWorker {
 	if typo.FontSize <= 0 || typo.LineHeight <= 0 {
 		typo = typo.withDefaults()
 	}
 	w := &textWorker{
-		fs:     fs,
-		typo:   typo,
-		faces:  make([]*font.Face, len(fs.entries)),
-		refs:   make([]*paint.Font, len(fs.entries)),
-		orders: make(map[fontKey][]int),
+		fs:         fs,
+		typo:       typo,
+		hyphenator: hyphenator,
+		faces:      make([]*font.Face, len(fs.entries)),
+		refs:       make([]*paint.Font, len(fs.entries)),
+		orders:     make(map[fontKey][]int),
 	}
 	for i := range fs.entries {
 		w.faces[i] = font.NewFace(fs.entries[i].font)
@@ -196,6 +205,35 @@ func (w *textWorker) shapeRange(p *paragraph, start, end int, defaultLang langua
 	w.addWordSpacing(p, out)
 	w.addAutospacing(p, out)
 	return out
+}
+
+// shapeHyphen shapes a synthetic hyphen for a line that ended at an allowed
+// hyphenation point. The hyphen is not part of paragraph.text, so it is shaped
+// on demand and only on the lines that actually use it.
+func (w *textWorker) shapeHyphen(st Style, langTag string) (*paint.Font, float32, shaping.Glyph, bool) {
+	size := resolveFontSize(st, w.typo)
+	lang := w.defaultLang
+	if langTag != "" {
+		lang = language.NewLanguage(langTag)
+	}
+	fm := workerFontmap{faces: w.faces, order: w.order(st)}
+	in := shaping.Input{
+		Text:      []rune{'-'},
+		RunStart:  0,
+		RunEnd:    1,
+		Direction: di.DirectionLTR,
+		Face:      fm.ResolveFace('-'),
+		Size:      fixed.Int26_6(float64(size) * 64),
+		Language:  lang,
+	}
+	if w.shapes != nil {
+		w.shapes.Add(1)
+	}
+	out := w.shaper.Shape(in)
+	if len(out.Glyphs) == 0 {
+		return nil, size, shaping.Glyph{}, false
+	}
+	return w.refs[faceIndex(w.faces, out.Face)], float32(out.Size) / 64, out.Glyphs[0], true
 }
 
 // isWordSpace reports whether r is a word-separating space for word-spacing.
@@ -344,9 +382,50 @@ func (w *textWorker) wrapParagraph(
 	blockStyle Style,
 	defaultLang language.Language,
 ) ([]lineBox, error) {
-	runs := w.shapeRange(p, 0, len(p.text), defaultLang)
+	wrapPara := p
+	var (
+		origIndex []int32
+		wrapHyph  map[int32]struct{}
+	)
+	if blockStyle.Hyphenate {
+		if wp, orig, hyph := w.hyphenatedParagraph(p); wp != nil {
+			wrapPara = wp
+			origIndex = orig
+			wrapHyph = hyph
+		}
+	}
+	runs := w.shapeRange(wrapPara, 0, len(wrapPara.text), defaultLang)
 	if len(runs) == 0 {
 		return nil, nil
+	}
+	// Synthetic hyphens are break opportunities, not text: measure them as
+	// zero-width so unused points inside a word cannot widen the line. When a
+	// line actually ends at one, its real advance is added back below, and the
+	// wrap limit is reduced by the widest hyphen so the result still fits.
+	var hyphAdv map[int32]float32
+	maxHyph := float32(0)
+	if len(wrapHyph) != 0 {
+		hyphAdv = make(map[int32]float32, len(wrapHyph))
+		for ri := range runs {
+			out := &runs[ri].out
+			for gi := range out.Glyphs {
+				g := &out.Glyphs[gi]
+				idx := int32(g.TextIndex())
+				if _, ok := wrapHyph[idx]; !ok {
+					continue
+				}
+				adv := float32(g.Advance) / 64
+				out.Advance -= g.Advance
+				g.Advance = 0
+				hyphAdv[idx] = adv
+				if adv > maxHyph {
+					maxHyph = adv
+				}
+			}
+		}
+	}
+	if len(hyphAdv) != 0 {
+		p.hyphAdv = hyphAdv
 	}
 	outs := make([]shaping.Output, len(runs))
 	for i := range runs {
@@ -356,8 +435,6 @@ func (w *textWorker) wrapParagraph(
 		Direction:   di.DirectionLTR,
 		BreakPolicy: shaping.WhenNecessary,
 	}
-	w.wrapper.Prepare(config, p.text, shaping.NewSliceIterator(outs))
-
 	align := blockStyle.TextAlign
 	indent := blockStyle.FirstLineIndent
 	if indent < 0 {
@@ -368,111 +445,149 @@ func (w *textWorker) wrapParagraph(
 		lineHeight = typo.LineHeight
 	}
 
-	lines := make([]lineBox, 0, len(p.text)/24+1)
-	lineStart := 0
-	first := true
-	y := float32(0)
-	for {
-		if err := ctx.Err(); err != nil {
+	// wrapOnce lays out the paragraph, measuring synthetic hyphens as zero
+	// width. A break at a hyphen adds its real advance afterwards. If that
+	// makes any line exceed its width, a second pass reserves the widest
+	// hyphen for every line, which guarantees used hyphens fit.
+	wrapOnce := func(pad float32) ([]lineBox, bool, error) {
+		w.wrapper.Prepare(config, wrapPara.text, shaping.NewSliceIterator(outs))
+		lines := make([]lineBox, 0, len(p.text)/24+1)
+		lineStart := 0
+		first := true
+		y := float32(0)
+		overflow := false
+		for {
+			if err := ctx.Err(); err != nil {
+				return nil, false, err
+			}
+			maxW := width
+			if first {
+				maxW = width - indent
+			}
+			if maxW <= 0 {
+				return nil, false, fmt.Errorf("%w: first-line indent leaves no line width", ErrInvalidOptions)
+			}
+			wrapW := maxW
+			if pad > 0 && wrapW > pad {
+				wrapW -= pad
+			}
+			wrapped, done := w.wrapper.WrapNextLineF(fixed.Int26_6(float64(wrapW) * 64))
+			if wrapped.Line == nil {
+				break
+			}
+			lineEnd := wrapped.NextLine
+			if lineEnd < lineStart {
+				lineEnd = lineStart
+			}
+			if lineEnd == lineStart && !done {
+				// Defensive: the wrapper should always make progress. Rather
+				// than spin forever on corrupt input, stop the paragraph here.
+				break
+			}
+
+			var (
+				lineWidth     float32
+				ascent        float32
+				descent       float32
+				lineHeightMax float32
+				implicitSize  float32
+				explicitHMax  float32
+			)
+			for _, out := range wrapped.Line {
+				lineWidth += float32(out.Advance) / 64
+				if a := float32(out.LineBounds.Ascent) / 64; a > ascent {
+					ascent = a
+				}
+				if d := float32(-out.LineBounds.Descent) / 64; d > descent {
+					descent = d
+				}
+				st := wrapPara.styleAt(out.Runes.Offset)
+				size := resolveFontSize(st, typo)
+				if st.LineHeight > 0 {
+					if h := size * st.LineHeight; h > explicitHMax {
+						explicitHMax = h
+					}
+				} else if size > implicitSize {
+					implicitSize = size
+				}
+				lh := st.LineHeight
+				if lh <= 0 {
+					lh = lineHeight
+				}
+				if h := size * lh; h > lineHeightMax {
+					lineHeightMax = h
+				}
+			}
+			height := lineHeightMax
+			if minH := ascent + descent; height < minH {
+				height = minH
+			}
+			if len(wrapHyph) != 0 {
+				if adv, ok := hyphAdv[int32(lineEnd-1)]; ok {
+					if lineWidth+adv > maxW+0.01 {
+						overflow = true
+					}
+					lineWidth += adv
+				}
+			}
+			leading := height - ascent - descent
+			if leading < 0 {
+				leading = 0
+			}
+			baseline := ascent + leading/2
+
+			x := float32(0)
+			switch align {
+			case AlignRight:
+				x = maxW - lineWidth
+			case AlignCenter:
+				x = (maxW - lineWidth) / 2
+			}
+			if first {
+				x += indent
+			}
+			start, endRune := int32(lineStart), int32(lineEnd)
+			if origIndex != nil {
+				start = origIndex[lineStart]
+				endRune = origIndex[lineEnd]
+			}
+			lines = append(lines, lineBox{
+				para:           p,
+				start:          start,
+				end:            endRune,
+				x:              x,
+				y:              y,
+				width:          lineWidth,
+				avail:          maxW,
+				height:         height,
+				baseline:       baseline,
+				last:           done,
+				align:          align,
+				ascent:         ascent,
+				descent:        descent,
+				implicitSize:   implicitSize,
+				explicitHeight: explicitHMax,
+			})
+			y += height
+			lineStart = wrapped.NextLine
+			first = false
+			if done {
+				break
+			}
+		}
+		return lines, overflow, nil
+	}
+
+	lines, overflow, err := wrapOnce(0)
+	if err != nil {
+		return nil, err
+	}
+	if overflow && maxHyph > 0 {
+		retry, _, err := wrapOnce(maxHyph)
+		if err != nil {
 			return nil, err
 		}
-		maxW := width
-		if first {
-			maxW = width - indent
-		}
-		if maxW <= 0 {
-			return nil, fmt.Errorf("%w: first-line indent leaves no line width", ErrInvalidOptions)
-		}
-		wrapped, done := w.wrapper.WrapNextLineF(fixed.Int26_6(float64(maxW) * 64))
-		if wrapped.Line == nil {
-			break
-		}
-		end := wrapped.NextLine
-		if end < lineStart {
-			end = lineStart
-		}
-		if end == lineStart && !done {
-			// Defensive: the wrapper should always make progress. Rather than
-			// spin forever on corrupt input, stop the paragraph here.
-			break
-		}
-
-		var (
-			lineWidth     float32
-			ascent        float32
-			descent       float32
-			lineHeightMax float32
-			implicitSize  float32
-			explicitHMax  float32
-		)
-		for _, out := range wrapped.Line {
-			lineWidth += float32(out.Advance) / 64
-			if a := float32(out.LineBounds.Ascent) / 64; a > ascent {
-				ascent = a
-			}
-			if d := float32(-out.LineBounds.Descent) / 64; d > descent {
-				descent = d
-			}
-			st := p.styleAt(out.Runes.Offset)
-			size := resolveFontSize(st, typo)
-			if st.LineHeight > 0 {
-				if h := size * st.LineHeight; h > explicitHMax {
-					explicitHMax = h
-				}
-			} else if size > implicitSize {
-				implicitSize = size
-			}
-			lh := st.LineHeight
-			if lh <= 0 {
-				lh = lineHeight
-			}
-			if h := size * lh; h > lineHeightMax {
-				lineHeightMax = h
-			}
-		}
-		height := lineHeightMax
-		if minH := ascent + descent; height < minH {
-			height = minH
-		}
-		leading := height - ascent - descent
-		if leading < 0 {
-			leading = 0
-		}
-		baseline := ascent + leading/2
-
-		x := float32(0)
-		switch align {
-		case AlignRight:
-			x = maxW - lineWidth
-		case AlignCenter:
-			x = (maxW - lineWidth) / 2
-		}
-		if first {
-			x += indent
-		}
-		lines = append(lines, lineBox{
-			para:           p,
-			start:          int32(lineStart),
-			end:            int32(end),
-			x:              x,
-			y:              y,
-			width:          lineWidth,
-			avail:          maxW,
-			height:         height,
-			baseline:       baseline,
-			last:           done,
-			align:          align,
-			ascent:         ascent,
-			descent:        descent,
-			implicitSize:   implicitSize,
-			explicitHeight: explicitHMax,
-		})
-		y += height
-		lineStart = wrapped.NextLine
-		first = false
-		if done {
-			break
-		}
+		return retry, nil
 	}
 	return lines, nil
 }

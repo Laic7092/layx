@@ -56,7 +56,11 @@ type Style struct {
 	LetterSpacing float32
 	// WordSpacing adds to the advance of word-separating spaces (U+0020 and
 	// U+00A0), like CSS word-spacing. It affects line breaking.
-	WordSpacing         float32
+	WordSpacing float32
+	// Hyphenate enables intra-word breaks supplied by LayoutOptions.Hyphenator
+	// for this block and its descendants. It has no effect when no hyphenator
+	// is configured.
+	Hyphenate           bool
 	Color               paint.Color
 	TextAlign           TextAlign
 	TextDecoration      TextDecoration

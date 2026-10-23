@@ -104,6 +104,8 @@ func chapterBreakKey(k *keyer, doc *Document, ch *Chapter, opts LayoutOptions, t
 	k.f32(opts.Viewport.Width)
 	k.f32(opts.Margins.Left)
 	k.f32(opts.Margins.Right)
+	k.flag(opts.Hyphenator != nil)
+	k.str(hyphenatorName(opts.Hyphenator))
 
 	var walk func(id NodeID, parent Style, parentLang string)
 	walk = func(id NodeID, parent Style, parentLang string) {
@@ -128,6 +130,7 @@ func chapterBreakKey(k *keyer, doc *Document, ch *Chapter, opts LayoutOptions, t
 		k.f32(st.FontSize)
 		k.f32(st.LetterSpacing)
 		k.f32(st.WordSpacing)
+		k.flag(st.Hyphenate)
 		// Border widths shrink the content box (and the top/bottom widths add
 		// to the block height), so they are horizontal layout inputs. Border
 		// colors, backgrounds and corner radii are paint-only and absent.

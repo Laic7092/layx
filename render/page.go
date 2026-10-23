@@ -277,6 +277,37 @@ func (l *Layout) buildLine(w *textWorker, it *flowItem, chapter int) ([]paint.Gl
 		}
 		out = append(out, run)
 	}
+	if it.para != nil && it.para.hyphenAt(it.end) {
+		st := it.para.styleAt(int(it.end) - 1)
+		langTag := ""
+		if seg := it.para.segAt(int(it.end) - 1); seg != nil {
+			langTag = seg.lang
+		}
+		if ref, size, hg, ok := w.shapeHyphen(st, langTag); ok {
+			color := st.Color
+			if color.Transparent() {
+				color = w.typo.Color
+			}
+			adv := float32(hg.Advance) / 64
+			if measured, ok := it.para.hyphAdv[it.end]; ok {
+				adv = measured
+			}
+			hrun := paint.GlyphRun{
+				Font: ref, Size: size, Color: color, X: pen, Y: it.baseline,
+				EmulateBold: emulateBold(st.FontWeight, ref),
+			}
+			hrun.Glyphs = []paint.Glyph{{
+				ID:      uint32(hg.GlyphID),
+				Y:       float32(hg.YOffset) / 64,
+				Advance: adv,
+				Cluster: int32(it.end - it.start),
+			}}
+			x0 := pen
+			pen += adv
+			pos = append(pos, glyphPos{runeIndex: int(it.end), x0: x0 - it.x, x1: pen - it.x})
+			out = append(out, hrun)
+		}
+	}
 	return out, pos
 }
 

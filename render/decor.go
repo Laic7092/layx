@@ -63,11 +63,12 @@ func (l *Layout) lineDecorations(w *textWorker, it *flowItem, chapter int, runs 
 		return nil
 	}
 	shaped := l.shapeLine(w, it, chapter)
-	if len(shaped) != len(runs) {
+	if len(shaped) > len(runs) {
 		return nil
 	}
 	var out []drawOp
-	for i := range runs {
+	// runs may contain one extra synthetic hyphen run with no decoration.
+	for i := 0; i < len(shaped); i++ {
 		st := shaped[i].style
 		if st.decoration == TextDecorationNone {
 			continue

@@ -200,7 +200,7 @@ func (e *Engine) layoutDoc(ctx context.Context, doc *Document, opts LayoutOption
 	}
 
 	pool := &sync.Pool{New: func() any {
-		w := newTextWorker(opts.Fonts, typo)
+		w := newTextWorker(opts.Fonts, typo, opts.Hyphenator)
 		w.defaultLang = defaultLang
 		w.shapes = &e.shapes
 		return w

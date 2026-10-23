@@ -98,6 +98,9 @@ func inheritStyle(parent, child Style, typo Typography) Style {
 	if out.WordSpacing == 0 {
 		out.WordSpacing = parent.WordSpacing
 	}
+	if !out.Hyphenate {
+		out.Hyphenate = parent.Hyphenate
+	}
 	if out.Color.Transparent() {
 		out.Color = parent.Color
 	}
