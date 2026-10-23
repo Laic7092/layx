@@ -31,8 +31,6 @@ type chapterPlacements struct {
 // laidChapter is a chapter with vertical positions and a page map. It is
 // produced from a breakChapter and reused while PageKey is unchanged.
 type laidChapter struct {
-	pageKey keyHash
-
 	items  []flowItem
 	paras  []*paragraph
 	boxes  []blockRect

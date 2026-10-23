@@ -76,7 +76,6 @@ type chapterFlow struct {
 	height     float32
 	pages      []pageInfo
 	firstPage  int
-	contentTop float32
 }
 
 // Layout is an immutable layout variant. Pages are rendered lazily and cached
@@ -245,17 +244,7 @@ func (e *Engine) layoutDoc(ctx context.Context, doc *Document, opts LayoutOption
 					t := &tasks[idx]
 					ch := &doc.chapters[t.chapter]
 					w := pool.Get().(*textWorker)
-					inline := &layoutContext{
-						ctx:         ctx,
-						doc:         doc,
-						opts:        opts,
-						typo:        typo,
-						limits:      e.limits,
-						chapter:     *ch,
-						chapterIdx:  t.chapter,
-						rootStyle:   t.rootStyle,
-						defaultLang: defaultLang,
-					}
+					inline := &layoutContext{doc: doc, typo: typo}
 					bc := &breakContext{
 						ctx:         ctx,
 						doc:         doc,
@@ -366,8 +355,6 @@ func (e *Engine) layoutDoc(ctx context.Context, doc *Document, opts LayoutOption
 	l.chapters = make([]chapterFlow, nch)
 	for ci := 0; ci < nch; ci++ {
 		ch := &doc.chapters[ci]
-		root := &ch.Nodes[ch.Root]
-		rootStyle := resolveStyle(doc.style(root.Style), typo)
 		lc := laid[ci]
 		cf := chapterFlow{
 			chapter:    *ch,
@@ -382,7 +369,6 @@ func (e *Engine) layoutDoc(ctx context.Context, doc *Document, opts LayoutOption
 			height:     lc.height,
 			pages:      lc.pages,
 			firstPage:  len(l.pages),
-			contentTop: rootStyle.MarginTop,
 		}
 		l.pages = append(l.pages, lc.pages...)
 		for id, pos := range lc.anchors {
@@ -488,10 +474,7 @@ func buildTasks(doc *Document, opts LayoutOptions, typo Typography, defaultLang 
 			return nil, nil, fmt.Errorf("%w: chapter %q has non-positive content width", ErrInvalidOptions, ch.ID)
 		}
 		plan := layoutPlan{chapter: ci, rootStyle: rootStyle}
-		lc := &layoutContext{
-			doc: doc, opts: opts, typo: typo,
-			chapter: *ch, chapterIdx: ci, defaultLang: defaultLang,
-		}
+		lc := &layoutContext{doc: doc, typo: typo}
 		if root.Kind == NodeInline {
 			var toks []inlineToken
 			if err := lc.flattenInline(nodes, []NodeID{ch.Root}, rootStyle, root.Lang, &toks); err != nil {
@@ -558,8 +541,8 @@ type lineBreak struct {
 	explicitHeight float32
 }
 
-// breakUnit is one vertical slot in a block. It is the cacheable counterpart
-// of flow.go's unit: the same structure, but line heights are not baked in.
+// breakUnit is one vertical slot in a block: the cacheable result of shaping
+// and line breaking, with vertical metrics still unapplied.
 type breakUnit struct {
 	kind  breakKit
 	para  *paragraph
@@ -579,7 +562,7 @@ type breakUnit struct {
 	widows, orphans int
 }
 
-// breakBox mirrors flow.go's blockBox without stacking its children.
+// breakBox is a block's break units before they are stacked.
 type breakBox struct {
 	units        []breakUnit
 	style        Style
@@ -649,9 +632,9 @@ func countBreakUnits(units []breakUnit) (items, paras int) {
 	return items, paras
 }
 
-// stackBreakUnits is the cache-friendly equivalent of flow.go's stackUnits.
-// The arithmetic matches stackUnits exactly so that a cached relayout and a
-// full layout produce identical line boxes and page boundaries.
+// stackBreakUnits turns break units into the flow items a page or tile slices.
+// Line heights are read from the current Typography here, which is why a
+// line-height change reuses cached line boxes instead of re-breaking them.
 func stackBreakUnits(units []breakUnit, defaultGap float32, typo Typography) (items []flowItem, paras []*paragraph, height float32, boxes []blockRect) {
 	nItems, nParas := countBreakUnits(units)
 	items = make([]flowItem, 0, nItems)

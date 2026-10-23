@@ -298,7 +298,7 @@ func TestRelayoutPaintOnly(t *testing.T) {
 	}
 }
 
-// BenchmarkRelayoutLineHeight5M is the M3 target benchmark: with cached line
+// BenchmarkRelayoutLineHeight5M is the relayout target benchmark: with cached line
 // boxes this must be a small fraction of a full 5M-rune layout.
 func BenchmarkRelayoutLineHeight5M(b *testing.B) {
 	doc, fs := cjkBenchDoc(b, 5_000_000)

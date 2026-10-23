@@ -516,10 +516,3 @@ func axisDistance(v, lo, hi float32) float32 {
 	}
 	return 0
 }
-
-func absF32(v float32) float32 {
-	if v < 0 {
-		return -v
-	}
-	return v
-}

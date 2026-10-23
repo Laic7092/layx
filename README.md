@@ -3,8 +3,6 @@
 纯 Go 的 reflowable 文档排版 / 渲染内核。输入是宿主已经解析、级联好的 `render.Document`，
 输出是分页结果、`DisplayList` 和命中/选区/锚点映射。**不解析 EPUB/XHTML/CSS，不内置光栅器。**
 
-当前进度：**M0、M1、M2、M3 已落地**（分页 + 滚动、三层缓存、tile 与行缓存）。
-
 ```text
 宿主/编译器                         本库
 EPUB / OPF / spine / CSS      →     render.Document
@@ -16,15 +14,20 @@ XHTML / 选择器 / 级联                ↓
 宿主 Painter（GPU / 软件 / e-ink）
 ```
 
+已实现：分页与滚动两条输出路径、三层布局缓存、shaped 行缓存、tile 缓存、
+命中测试/跨页选区/锚点映射、CJK 断行与标点政策、可插拔断字、边框/背景/文字装饰。
+设计取舍见 [`docs/design.md`](docs/design.md)。
+
 ## 包结构
 
 ```text
 github.com/laix/layx/render        核心：IR、字体、布局、分页、命中、选区
 github.com/laix/layx/render/paint  绘制接口与基础类型（无光栅器）
+github.com/laix/layx/render/hyphen/en  可选：TeX 英文断字模式，核心不 import 它
 examples/layout                    最小示例：排版并打印页数
 ```
 
-核心直接依赖只有 `go-text/typesetting`（shaping / UAX #14 断行）和
+直接依赖只有 `go-text/typesetting`（shaping / UAX #14 断行）和
 `golang.org/x/image/math/fixed`。`go list -deps ./render` 里会出现 `image/*`、
 `encoding/xml`，这是 `go-text/typesetting/font` 解析彩色/位图字体带进来的传递依赖，
 不是本库直接引入。`render/deps_test.go` 对**直接 import** 做了闸门。
@@ -78,7 +81,7 @@ err := b.AddChapter(render.Chapter{
 doc, err := b.Build()
 ```
 
-### 中文小说的推荐开关组
+## 中文正文的推荐开关组
 
 引擎不自作主张：标点挤压、行末悬挂、孤行/寡行保护、中西文间距都是**政策**，零值
 一律是规范初始值（即全部关闭）。做中文正文时建议在 `Typography.Rules` 里显式打开：
@@ -101,158 +104,60 @@ Typography: render.Typography{
 Style{FontSize: 18, FirstLineIndent: 36, TextAlign: render.AlignJustify},
 ```
 
-`Rules` 整体参与 `BreakKey`，改任何一个开关都会让断行结果失效重算，不会出现
-"缓存命中但排版是旧的"。
+政策清单、默认值的规范出处、以及"新增开关必须进缓存 key"的约束见
+[`docs/text-rules.md`](docs/text-rules.md)。
 
-位置语义：
+## 位置语义
 
-- `Location{Chapter, Node, Anchor, Offset}`：`Node`/`Offset` 用于当前 layout 内的命中、选区、
-  搜索；`Anchor` 是宿主可持久化的稳定锚点（无锚点时为 0）。
+- `Location{Chapter, Node, Anchor, Offset}`：`Node`/`Offset` 用于当前 layout 内的
+  命中、选区、搜索；`Anchor` 是宿主可持久化的稳定锚点（无锚点时为 0）。
 - `Layout.Locate(anchor)` → `Location`，`Layout.PageOf(loc)` → 页码。
-- `Page.HitTest(x, y)`、`Layout.Selection(from, to)` 返回的是同一套 `Location` / 页面矩形。
+- `Page.HitTest(x, y)`、`Layout.HitTest(x, y)`、`Layout.Selection(from, to)` 返回同一套
+  `Location` / 矩形。
+- `Layout.LocationAt(y)` / `Layout.OffsetOf(loc)` 在分页与滚动两种模式下使用同一套
+  内容坐标，并且互为逆运算。
 - 宿主负责把 `Location` 映射到 CFI、书签或数据库进度。
 
-## M0 已完成
+## 两种输出
 
-- 扁平节点 IR（block / inline / text / image / br）+ 构建期校验（环、越界、样式、锚点、深度）
-- 纯 Go shaping：`go-text/typesetting` + 字体 fallback（按 family / weight / slant / 字形覆盖）
-- UAX #14 断行，中英文混排；CJK 行首禁则由 UAX #14 覆盖（测试覆盖 `，。、；：！？）` 等）
-- 块布局：margin、嵌套 block、段落间距、首行缩进、左/右/居中/两端对齐
-- 图片：按固有宽高比预留、超宽缩放、居中/左右对齐、不跨页
-- 分页：页边距、`break-before/after`、`KeepTogether`、`widows/orphans`
-- 并发：顶层 block 任务级并行，每 worker 独立 `HarfbuzzShaper` / `LineWrapper` / `FontFace`
-- 内存策略：只保留行盒、页映射、段落 rune 和锚点，不保留全书 shaped glyph
-- `Page` 懒生成 DisplayList + FIFO PageCache；`Page.Draw` 可并发（每 goroutine 自己的 Painter）
-- 命中测试、跨页选区、页面链接、锚点 → 页
-- 取消（`context`）、`Limits`、typed error、无 `init()`、无日志、无全局状态
-- 基准 / golden / race / workers 一致性测试
+`LayoutOptions.Mode` 选择输出方式，断行与块布局完全共享，只有"取窗口"不同。
 
-## 实测（本机，AMD Ryzen 7 5800H）
+### 分页（`ModePaged`，默认）
 
-Noto Sans CJK SC，18px，600×900 视口，5,000,000 字，只做布局（不含绘制）：
-
-| Workers | 时间 | 分配 |
-|---:|---:|---:|
-| 1 | 4.37 s | 860 MB |
-| 4 | 1.44 s | 864 MB |
-| 8 | 0.92 s | 870 MB |
-| 16 | 0.87 s | 882 MB |
-
-说明：这是 M0 的**总分配量**，不是常驻内存；行盒/页映射是常驻的，shaped glyph 不保留。
-分配量主要来自每段的 shaping/wrapping 临时对象，M1 会做池化与分块复用。
-
-复现：
-
-```sh
-LAYX_CJK_FONT=/path/to/NotoSansCJK-Regular.ttc \
-LAYX_CJK_FONT_INDEX=2 \
-go test ./render -run '^$' -bench 'BenchmarkLayout5M' -benchtime 1x
+```go
+layout.PageCount()
+layout.Page(i)          // 首次访问构建 DisplayList，之后按 Options.PageCache 做 LRU
+page.Draw(painter)
+page.HitTest(pt)
+page.Links()
 ```
 
-## 渲染快照 / 阶段对比
-
-`scripts/snapshot.sh` 用无头浏览器把引擎输出截成 PNG，并按阶段做前后对比。
-快照是构建产物，放在 `snapshots/`（已 gitignore），不会进仓库。
-
-```sh
-./scripts/snapshot.sh M0                 # 记录当前阶段
-./scripts/snapshot.sh M1 --pages 1,2     # 下一个阶段，自动和 M0 对比
-./scripts/snapshot.sh --compare M0 M1    # 只重生成对比图
-cat snapshots/index.md                   # 阶段元数据 + 图片 + 像素差异统计
-```
-
-依赖：`go`、`curl`，以及 Chrome/Chromium（或 WSL 下的 Windows Chrome/Edge；
-也可以用 `CHROME=/path/to/chrome` 指定）。对比图是左右并排 + 差异热力图，
-统计输出形如 `changed_pct=6.58 mean_abs_diff=6.988`。
-
-## 与 WebView 的 A/B
-
-`scripts/ab.sh` 在同一个 Chromium 里跑两条路径：`native`（layx 编译成 wasm）
-和 `webview`（DOM + CSS multi-column），语料、viewport、字体、字号、页边距完全一致。
-
-```sh
-./scripts/ab.sh m1 --chars 200000 --turns 100 --repeat 3
-```
-
-输出表格并写 `snapshots/ab/m1.json`（gitignored）。
-
-两边的字体必须是同一份字节。WebView 侧走 `@font-face`，而 Chrome 的 OTS
-会拒绝 `.ttc` 字体集，所以 `build.sh` 给 demo 选 WenQuanYi/Noto 这类好看的
-`.ttc`，`ab.sh` 则固定一个单 face `.ttf`。本机唯一同时支持 CJK 的单 face
-TTF 是 Droid Sans Fallback，它没有拉丁字形：native 侧把英文画成 `.notdef`，
-浏览器却会换成别的字体，两侧量的就不是同一段文字了。所以 `ab.js` 会先探测
-字体覆盖（渲染像素哈希，见 `fontCoverage`），把字体画不出来的段落从语料里
-去掉，并在结果里记 `fontCoverage` / `corpusParagraphsDropped`；`ab_report.py`
-在表格下面打一行 note。早先那一版没有这条保护，英文段落贡献了一个**假的**
-27% 行数差（详见下一节）。想要可读且覆盖完整的输出，就用
-`LAYX_FONT=/path/to/single-face.ttf ./scripts/ab.sh ...`。覆盖：首页耗时、整书布局、
-冷/热翻页 p50/p99、字号重排、行高重分页、内存。尚未覆盖：应用冷启动、
-进程树 RSS、滚动掉帧、多线程 native（wasm 只有 GOMAXPROCS=1）。
-
-## 与浏览器的断行一致性（linecmp）
-
-`scripts/linecmp.sh` 把同一段文字、同一份字体字节交给两边，逐**行**比对内容：
-native 侧由 `render/linecmp_test.go` 导出每个行盒（文本、宽度、y），浏览器侧用
-`Range.getClientRects()` 把字符按行分组。A/B 比的是耗时，这里比的是断行。
-
-```sh
-./scripts/linecmp.sh cjk          # 纯中文，Droid Sans Fallback
-./scripts/linecmp.sh punct --trim both   # 对话密集、标点成串
-./scripts/linecmp.sh latin        # 英文，DejaVu Serif
-./scripts/linecmp.sh mixed-ja     # 日文 + 英文词 + 数字，IPA Gothic
-```
-
-四种语料、字体覆盖各自的文字，结果：
-
-| 语料 | 行数 | 行内容一致 | 页数 |
-|---|---|---|---|
-| 纯中文 | 54 | 54/54 | 3 == 3 |
-| 英文（同字体） | 42 | 42/42 | 2 == 2 |
-| 日文 + 英文混排 | 63 | 63/63 | 3 == 3 |
-| 中文对话、标点密集（引擎 `compress` on） | 70 | **70/70** | 3 == 3 |
-| 同上，浏览器 `text-spacing-trim: space-all`（引擎规则全关） | 70 | **70/70** | 3 == 3 |
-
-最后两行是同一段文字，各自和对应的浏览器行为比：punct 模式下脚本用 `LPX_RULES`
-给 native 侧打开 `Typography.Rules.PunctuationCompression`，再和 Chrome 默认的
-`text-spacing-trim` 逐行比对；space-all 那行则关掉引擎的全部政策开关，和关掉
-浏览器挤压的结果比对。也就是说断行本身（UAX #14 断点、行尾宽度、缩进、两端对齐
-前的自然宽度）与 Chrome 一致，**挤压也一致**：42/70 → 70/70。
-
-这里有一个容易读错的细节：Chrome 的 `text-spacing-trim` 是**按字体**生效的，
-不是按字符类无条件生效。用 linecmp 的语料字体（Droid Sans Fallback）量下来，
-它实际压缩的是 `：“` 里的引号（28 处），而 `。”`、`——`、`……` 一个都没有变，
-因为冒号/句号来自主字体、引号来自回退字体，Chromium 只对“它认为支持压缩”的
-字形动手。引擎侧因此只压缩引号一类（以及同样被浏览器压缩的〈〉），规则表由
-`render/punct_test.go` 固定；对话密集的文本里它每行多放 1–2 个字，页数差一页。
-旧版 README 把“成对标点都会被压缩”当成结论，是拿总行数反推的误读。
-
-`--trim space-all` 这行依赖浏览器真的支持该属性：本机的 headless Chromium 145
-会解析却忽略它，Windows Chrome 则正确生效，脚本会在那种情况下打印 note。
-
-## 滚动模式（M2）
+### 滚动（`ModeScroll`）
 
 ```go
 layout, _ := eng.Layout(ctx, doc, render.LayoutOptions{
-    Mode:       render.ModeScroll, // 默认 ModePaged
+    Mode:       render.ModeScroll,
     TileHeight: 1024,              // 0 = Viewport.Height
     ...
 })
 layout.ContentHeight() // 整条流的高度
 layout.TileCount()
-layout.Tile(i)         // 首次访问构建，之后按 Options.TileCache（默认 8）做 LRU
+layout.Tile(i)         // 首次访问构建，之后按 Options.TileCache 做 LRU
 layout.Tiles(lo, hi)   // 同步预取，不引入隐藏 goroutine
 ```
 
-分页与滚动共享同一份断行与块布局，只是"取窗口"的方式不同；测试用字形
-id/cluster/内容坐标逐字比对两条路径。**tile 是 DisplayList，不是位图**：
-`render` 没有光栅器，是否把 tile 缓存成图片由宿主决定。
+**tile 是 DisplayList，不是位图**：`render` 没有光栅器，是否把 tile 缓存成图片由宿主决定。
 
-`Options.LineCache`（默认 256）缓存未做两端对齐的 shaped 行，滚动时避免对
-同一行重复 shaping；命中不增加 `Engine.shapes` 计数。
+内容坐标：
 
-## 变体缓存（M3）
+- 滚动模式：`y = 0` 是整本书正文顶端，章与章连续堆叠；每章自己的根 block 边距保留，
+  页边距不在章间重复。`Margins.Top/Bottom` 是页面视口 inset，不进入内容坐标；
+  `Margins.Left/Right` 仍用于 tile 内的 x 定位。
+- 分页模式：页面视口首尾相接成一条虚拟流，第 p 页覆盖 `[p*contentHeight, (p+1)*contentHeight)`。
+- 每行只属于一个 tile（按行盒顶边分配）；图片可跨 tile，由 Painter 裁剪。因此所有
+  tile 的字形总数等于所有页的字形总数。
 
-`Layout.Relayout` 按三层 key 复用阶段产物：
+## 重排与缓存
 
 ```text
 BreakKey = hash(text, fonts, fontSize, letterSpacing, width, lang, align, indent, rules)
@@ -260,69 +165,93 @@ PageKey  = hash(BreakKey, lineHeight, paragraphGap, pageHeight, margins)
 PaintKey = hash(PageKey, theme)
 ```
 
-`rules` 是 `Typography.Rules`（`TextRules`）的**整体哈希**：新增一个政策字段
-会自动进 key。`Widows`/`Orphans` 也只影响分页，但出于同样的安全考虑一起进了
-`BreakKey`，代价是改孤行设置时多做一次断行。
+`Layout.Relayout(ctx, opts)` 按这三层 key 复用阶段产物：
 
 - `BreakKey` 命中：不 shaping、不断行，直接复用 `breakUnit`。
 - `PageKey` 命中：复用行盒与页映射，只重算 y 和页边界。
 - 只保留每章最近 2 个变体；`breakUnit` 只存 rune 区间和行度量，不存 shaped glyph。
+- `Options.LineCache`（默认 256）缓存未做两端对齐的 shaped 行，命中不增加 `Engine.shapes`。
 
-实测（本机，500 万字）：行高重排 22ms，段间距重排（20 万字）0.16ms。
+`rules`（`Typography.Rules`）作为整体进 key：新增一个政策字段会自动参与哈希。
 
-## 测试
+## 文本排版能力
+
+- 纯 Go shaping（`go-text` + HarfBuzz 移植），按 family/weight/slant/字形覆盖做 fallback。
+- UAX #14 断行，中英日混排；行首禁则由 UAX #14 覆盖。
+- 块布局：margin（相邻折叠）、嵌套 block、段落间距、首行缩进、左/右/居中/两端对齐。
+- 两端对齐把余量分给空格和 CJK 字间隙，标点相邻的间隙按半权重参与。
+- 图片：按固有宽高比预留、超宽缩放、居中/左右对齐、不跨页。
+- 分页：页边距、`break-before/after`、`KeepTogether`、`widows/orphans`。
+- 可选：标点挤压、行末悬挂、中西文间距、`word-spacing`、断字（`render/hyphen/en`）。
+- 表现层：块背景/边框/圆角、下划线/删除线、合成粗体标记（`EmulateBold`，是否加粗由宿主决定）。
+- 并发：顶层 block 任务级并行，每个 worker 独立 `HarfbuzzShaper` / `LineWrapper` / `FontFace`。
+- 取消（`context`）、`Limits`、typed error、无 `init()`、无日志、无全局状态。
+
+## 性能
+
+本机（Ryzen 7 7800X3D，8 核 16 线程），文泉驿微米黑，18px，600×900 视口，
+5,000,000 字，只做布局（不含绘制）：
+
+| Workers | 时间 | 分配 |
+|---:|---:|---:|
+| 1 | 1.17 s | 722 MB |
+| 4 | 0.34 s | 726 MB |
+| 8 | 0.23 s | 731 MB |
+| 16 | 0.20 s | 742 MB |
+
+分配量是总量，非常驻内存；行盒/页映射常驻，shaped glyph 不保留。同一台机器上
+500 万字行高重排 22 ms，20 万字段间距重排 0.17 ms（均只重算 y 和页映射）。
+
+复现（换成任何覆盖中文的字体）：
+
+```sh
+LAYX_CJK_FONT=/usr/share/fonts/truetype/wqy/wqy-microhei.ttc \
+LAYX_CJK_FONT_INDEX=0 \
+go test ./render -run '^$' -bench 'BenchmarkLayout5M|BenchmarkRelayout' -benchtime 1x
+```
+
+## 验证
 
 ```sh
 go test ./... -count=1
 go test ./render -race -count=1
 go vet ./...
-go test ./render -run '^$' -bench . -benchtime 1x
 ```
 
-`render/testdata/DejaVuSerif.ttf` 用于确定性 golden 测试；CJK 测试会自动探测常见
-Noto 路径，找不到则跳过（可用 `LAYX_CJK_FONT` / `LAYX_CJK_FONT_INDEX` 指定）。
+三个对照脚本需要 `curl` 和 Chrome/Chromium（或 `CHROME=/path/to/chrome`）：
 
-## 已知限制 / 下一步
+- `./scripts/linecmp.sh {cjk,latin,mixed-ja,punct}`：同一份字体字节交给引擎与浏览器，
+  逐**行**比对内容（native 侧导出行盒，浏览器侧用 `Range.getClientRects()`）。
+  纯中文 54/54、英文 42/42、日英混排 63/63、对话密集 + 挤压 70/70 行内容一致。
+- `./scripts/ab.sh book --chars 200000 --turns 100`：同一个 Chromium 里跑 layx-wasm 与
+  DOM + CSS multi-column，比对首页耗时、整书布局、冷/热翻页、字号重排、行高重分页。
+  脚本用像素哈希探测字体覆盖并剔除画不出的段落，避免两侧量的不是同一段文字。
+- `./scripts/snapshot.sh base` / `./scripts/snapshot.sh change --pages 1,2`：无头浏览器
+  截图并按阶段做像素差异对比，产物在 `snapshots/`（gitignored）。
 
-- 尚未实现：表格、ruby、竖排、flex/grid、RTL 视觉序、浮动环绕、脚注、链接命中透传。
-- 标点挤压（`Typography.Rules.PunctuationCompression`）与行末悬挂
-  （`HangingPunctuation`）默认都关，需要显式打开。挤压压缩“成对引号”的半宽，
-  规则按 linecmp 量到的浏览器行为固定（见上一节）；全角括号/逗号/句号不压缩，
-  因为 Chromium 在这套字体上也没压它们。悬挂允许行末收尾标点探出内容盒至多
-  半个字宽，且只在关闭断字时生效（行尾悬挂会改变换行位置，因此参与 `BreakKey`）。
-- 两端对齐会把余量分给空格和 CJK 字间隙；标点相邻的间隙按半权重参与。
-- **`Autospacing`（中西文 1/8 em）默认 off**，因为它来自 CLREQ 的建议而不是
-  CSS 初始值。`Widows` / `Orphans` 的零值仍按 CSS 初始值提升为 2/2（0 在 CSS
-  里不是合法值），想要"填满页面、不做孤寡行保护"就写 `1`。
-- `keep-with-next`（标题不与正文分离）尚未实现，只有 `KeepTogether` 与
-  `break-before/after`。
-- 行高 / 段间距变化走 `Layout.Relayout` 的变体缓存（500 万字约 22ms）；但
-  `examples/wasm` 目前仍直接调用 `Engine.Layout`，所以浏览器 demo 没有用上这条路径。
+## 已知限制
+
+- 尚未实现：表格、ruby、竖排、flex/grid、RTL 视觉序、浮动环绕、脚注。
+- `keep-with-next`（标题不与正文分离）未实现，只有 `KeepTogether` 与 `break-before/after`。
 - 分页暂按行边界；复杂 `break-inside` 与跨页图片策略仍需细化。
-- 页面背景与主题色由 `Typography.Background` / `Typography.Color` 提供；块背景、
-  边框与文字装饰由 `Style.Background` / `Style.Border*` / `Style.TextDecoration`
-  提供，绘制后端自行决定。
+- 标点挤压只压缩"成对引号"的半宽，规则按 linecmp 量到的 Chromium 行为固定；全角括号/
+  逗号/句号不压缩，因为 Chromium 在这套字体上也没压它们。悬挂只在关闭断字时生效。
+- `Typography.Rules` 的零值按规范初始值处理（`Widows`/`Orphans` 为 2/2）。想要"填满
+  页面、不做孤寡行保护"写 `1`。
+- `examples/wasm` 的浏览器 demo 仍直接调用 `Engine.Layout`，没有使用 `Relayout` 的
+  变体缓存。
 - fixed-layout / 脚本化 EPUB 不在 IR 的表达范围内：核心只接受已解析、可重排的
   `Document`，这类内容的处置是宿主的事。
-- 与浏览器的差距：**已补齐** —— 边框/背景/圆角、下划线与删除线、
-  `word-spacing`、合成粗体标记、可插拔断字（`render/hyphen/en` 内置 TeX
-  英文模式）、标点挤压与行末悬挂（policy 开关，见 linecmp 一节）；**能补没补**
-  —— 表格、脚注；**IR 不表达** —— flex/grid、竖排、ruby、transform、脚本。
-  “IR 不表达”只说明核心不认识这些结构，不说明宿主该怎么办：那是宿主的决定。
-  核心的责任是把“这个文档里有我表达不了的东西”报告出来，而不是默默丢掉或
-  自行降级——参见下面的“诊断”。
-- 早先记的“A/B 里总行数比 Chrome 多 27%”是测量错误，已查清并修掉：语料里那段
-  纯英文用的是 Droid Sans Fallback，它没有拉丁字形，native 画 `.notdef`、浏览器
-  换字体，两边量的不是同一段文字。加上字体覆盖探测后同一份 A/B 的页数是 61 vs 63
-  （3%），剩下的差异就是上一条的标点挤压。断行本身逐行与 Chrome 一致。
-- 断字默认关闭。宿主需同时给 `LayoutOptions.Hyphenator`（例如
-  `hyphenen.New()`）和块样式 `Style.Hyphenate: true`；两者都齐才会在词内加
-  连字符，且只有整词放不下时才启用。
-- 性能上：单核与 Blink 打平（500 万字 1.54s vs 外推 1.41s），8 核快 3–5×，
-  改行高快一个数量级；shaping 用 go-text（HarfBuzz 的 Go 移植），单核上限低于
-  Blink；滚动/翻页的合成优势在宿主，核心只提供 tile DisplayList。
+- **不提供诊断输出**：IR 表达不了的内容（表格、ruby、竖排等）目前不会被报告，宿主需要
+  在构建 `Document` 时自行记录并决定降级策略。
+- 与浏览器的差距：能补没补的是表格与脚注；IR 不表达的是 flex/grid、竖排、ruby、
+  transform、脚本。两者的区别是前者只需要新样式/分页规则，后者需要新的布局模型。
+- 断字默认关闭，需同时给 `LayoutOptions.Hyphenator`（如 `hyphenen.New()`）和块样式
+  `Style.Hyphenate: true`；只有整词放不下时才在词内加连字符。
+- 性能上：单核与 Blink 打平，多核快 3–5×，改行高快一个数量级；滚动/翻页的合成优势
+  在宿主，核心只提供 tile DisplayList。
 
 ## 许可
 
-核心代码尚未附 LICENSE；测试字体 `DejaVuSerif.ttf` 使用 DejaVu 许可，见
-`render/testdata/DejaVu-LICENSE.txt`。
+核心代码尚未附 LICENSE；测试字体 `render/testdata/DejaVuSerif.ttf` 使用 DejaVu 许可，
+见 `render/testdata/DejaVu-LICENSE.txt`。

@@ -37,11 +37,11 @@
 | `TextAlign` | `start`（左对齐） | CSS Text L3 §7.1 | BreakKey |
 | `FirstLineIndent` | `0` | CSS `text-indent` 初始值 | BreakKey |
 | `Hyphenation` | off | CSS Text L3 §5 | BreakKey |
-| `LetterSpacing` | `0` | CSS | BreakKey |
+| `LetterSpacing` | `0` | CSS `letter-spacing` 初始值 | BreakKey |
+| `WordSpacing` | `0` | CSS `word-spacing` 初始值 | BreakKey |
 | `Autospacing`（中西文间距） | **off** | CLREQ 建议项，非 CSS | BreakKey |
 | `PunctuationCompression`（标点挤压） | **off** | CSS Text L4 `text-spacing-trim`、JLREQ/CLREQ | BreakKey |
 | `HangingPunctuation`（行末悬挂） | **off** | CSS Text L4 `hanging-punctuation` | BreakKey |
-| `JustifyStrategy` | 只分配空格 | CSS Text L3 §7.3 | 绘制期，不影响断行 |
 | `ParagraphGap` | `0` | CSS 由样式给 margin，引擎不自作主张 | PageKey |
 | `Widows` / `Orphans` | **2**（CSS 初始值；`1` = 不保护） | CSS Fragmentation L3 §4.4 | 只影响分页，但随 `TextRules` 整体进 BreakKey |
 
@@ -60,8 +60,10 @@
   引号来自回退字体，主字体提供的全角括号和逗号没有参与。引擎的挤压规则因此
   按 linecmp 的可观测结果固定为引号类标点（`render/punct_test.go`），不假装
   自己比浏览器多知道一层“字体是否支持压缩”。
-- `Autospacing`（1/8 em）曾经是无条件执行的，与"零值 = 规范默认"冲突；现在由
-  `TextRules.Autospacing` 驱动，默认 off。
+- 两端对齐的余量分配不是开关：空格与 CJK 字间隙按权重分摊，标点相邻的间隙
+  半权重。它在绘制期计算，不进任何 key。
+- `Autospacing`（1/8 em）不是无条件执行的：它由 `TextRules.Autospacing` 驱动，
+  默认 off，否则会与"零值 = 规范默认"冲突。
 - `Widows` / `Orphans` 的零值是"未设置"，`Typography.withDefaults()` 把它提升为
   CSS 初始值 2/2。CSS 只接受正整数，所以"不保护"的正确写法是 `1`，不是 `0`：
   让 0 表示关闭会造出"零值 ≠ 规范默认"的例外，而填满页面本来就是用 1 表达的。
@@ -97,7 +99,7 @@
 
 核心不提供 `Profile: Book` 之类的命名预设。`Book` 是审美判断，核心不该有。
 
-- 预设放在文档、`examples/`，或独立的 `layx/presets` 小包。
+- 预设放在文档或 `examples/` 里，不进核心。
 - 好处：预设可以随审美演进、可以由社区贡献多个，核心保持中立。
 
 ## 默认全关的代价
@@ -105,7 +107,7 @@
 开箱即用的中文排版会比浏览器"看起来差一点"：标点不挤压、没有孤行保护、中西
 文之间不加间距。这是**正确性的代价**，需要接受，并用文档补上：
 
-- README 首屏给出"做中文小说请打开这四个开关"的代码块；
+- README 的「中文正文的推荐开关组」给出代码块；
 - 用文档承担审美，而不是用默认值承担。
 
 ## 开关只调参数，不换模型
@@ -134,13 +136,12 @@
 | `Widows` / `Orphans` 零值 | **按 CSS 初始值提升为 2/2** | "零值 = 规范默认"不能在这里破例；不保护用合法值 `1` 表达 |
 | 中文首行缩进 2em | **完全交给样式，核心不提供默认值** | 首行缩进是文档排版决策，不该由引擎注入；`Typography` 不新增该字段 |
 
-## 实施状态
+## 当前实现
 
-五条待办已完成：`Widows`/`Orphans` 零值按规范提升为 2/2（`1` 为关闭）、
-`Autospacing` 改由开关驱动并
-默认 off、依赖旧默认值的测试改为显式传值、`TextRules` 收口并整体哈希进
-`BreakKey`（含穷举/反向测试）、`examples/` 显式设置 `FirstLineIndent` 且 README
-给出中文小说推荐开关组。
+上表的四个决策与两两个可选政策（`PunctuationCompression`、
+`HangingPunctuation`）均已实现，零值均为规范默认（即关闭）。
 
-`PunctuationCompression` 与 `HangingPunctuation` 也已按本文的开关约定实现，
-默认 off；挤压的验收见 README 的 linecmp 一节。
+- 孤行/寡行、`Autospacing`、`TextRules` 整体哈希进 `BreakKey`，都带穷举/反向测试
+  （`render/keys_test.go`）。
+- 中文首行缩进只存在于 `Style`，`examples/` 与 README 示例显式设置。
+- 挤压的验收见 README 的 linecmp 一节；规则表由 `render/punct_test.go` 固定。

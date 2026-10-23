@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # A/B the layx engine against DOM + CSS multi-column ("webview") in the same
-# Chromium instance, and print the first batch of metrics from Layx.md §9.
+# Chromium instance, and print the metrics described in the README's verification section.
 #
-#   scripts/ab.sh m1
-#   scripts/ab.sh m1 --chars 500000 --turns 200 --repeat 5
+#   scripts/ab.sh book
+#   scripts/ab.sh book --chars 500000 --turns 200 --repeat 5
 #   scripts/ab.sh smoke --chars 50000 --repeat 1 --workers 1,4
 #
 # Results are JSON in snapshots/ab/<label>.json (gitignored) plus a table on

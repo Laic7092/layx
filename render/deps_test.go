@@ -6,7 +6,7 @@ import (
 	"testing"
 )
 
-// TestCoreImports is the M0 dependency gate: the core package may not directly
+// TestCoreImports is the dependency gate: the core package may not directly
 // import container, network, HTML/CSS or image-decoding packages. Transitive
 // dependencies of go-text/typesetting/font are tracked separately because
 // that module pulls image and XML support for color/bitmap fonts.

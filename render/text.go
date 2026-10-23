@@ -353,21 +353,18 @@ func faceIndex(faces []*font.Face, target *font.Face) int {
 }
 
 type lineBox struct {
-	para   *paragraph
-	start  int32
-	end    int32
-	x      float32
-	y      float32
-	width  float32
-	avail  float32
-	height float32
-	// baseline is the distance from the line top to the text baseline.
-	baseline float32
-	last     bool
-	align    TextAlign
+	para  *paragraph
+	start int32
+	end   int32
+	x     float32
+	width float32
+	avail float32
+	last  bool
+	align TextAlign
 
 	// Vertical metrics captured at break time so a layout can be re-stacked
-	// with a different Typography.LineHeight without re-shaping.
+	// with a different Typography.LineHeight without re-shaping. The line
+	// height and baseline themselves are derived by lineMetrics.
 	ascent  float32
 	descent float32
 	// implicitSize is the largest font size on the line that inherits the
@@ -446,10 +443,6 @@ func (w *textWorker) wrapParagraph(
 	if indent < 0 {
 		indent = 0
 	}
-	lineHeight := blockStyle.LineHeight
-	if lineHeight <= 0 {
-		lineHeight = typo.LineHeight
-	}
 
 	// Hanging punctuation needs each rune's advance at line boundaries. It is
 	// off by default and interacts with synthetic hyphens and re-mapped rune
@@ -482,7 +475,6 @@ func (w *textWorker) wrapParagraph(
 		// width loses the already-placed advance.
 		placed := 0
 		first := true
-		y := float32(0)
 		overflow := false
 		for {
 			if err := ctx.Err(); err != nil {
@@ -531,12 +523,11 @@ func (w *textWorker) wrapParagraph(
 			}
 
 			var (
-				lineWidth     float32
-				ascent        float32
-				descent       float32
-				lineHeightMax float32
-				implicitSize  float32
-				explicitHMax  float32
+				lineWidth    float32
+				ascent       float32
+				descent      float32
+				implicitSize float32
+				explicitHMax float32
 			)
 			for _, out := range wrapped.Line {
 				lineWidth += float32(out.Advance) / 64
@@ -555,22 +546,11 @@ func (w *textWorker) wrapParagraph(
 				} else if size > implicitSize {
 					implicitSize = size
 				}
-				lh := st.LineHeight
-				if lh <= 0 {
-					lh = lineHeight
-				}
-				if h := size * lh; h > lineHeightMax {
-					lineHeightMax = h
-				}
 			}
 			// The prefix [lineStart, dispStart) already belongs to the
 			// previous line.
 			for i := lineStart; i < dispStart; i++ {
 				lineWidth -= runeAdv[i]
-			}
-			height := lineHeightMax
-			if minH := ascent + descent; height < minH {
-				height = minH
 			}
 			if len(wrapHyph) != 0 {
 				if adv, ok := hyphAdv[int32(lineEnd-1)]; ok {
@@ -603,12 +583,6 @@ func (w *textWorker) wrapParagraph(
 			}
 			placed = lineEnd
 
-			leading := height - ascent - descent
-			if leading < 0 {
-				leading = 0
-			}
-			baseline := ascent + leading/2
-
 			x := float32(0)
 			switch align {
 			case AlignRight:
@@ -629,11 +603,8 @@ func (w *textWorker) wrapParagraph(
 				start:          start,
 				end:            endRune,
 				x:              x,
-				y:              y,
 				width:          lineWidth,
 				avail:          maxW,
-				height:         height,
-				baseline:       baseline,
 				last:           done,
 				align:          align,
 				ascent:         ascent,
@@ -641,7 +612,6 @@ func (w *textWorker) wrapParagraph(
 				implicitSize:   implicitSize,
 				explicitHeight: explicitHMax,
 			})
-			y += height
 			lineStart = wrapped.NextLine
 			first = false
 			if done {

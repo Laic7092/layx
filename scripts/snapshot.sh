@@ -3,9 +3,9 @@
 # before it. Snapshots are build products: they live in snapshots/ and are
 # gitignored, only this script is versioned.
 #
-#   scripts/snapshot.sh M0
-#   scripts/snapshot.sh M1 --pages 1,2 --size 18 --lh 1.65 --dpr 2
-#   scripts/snapshot.sh --compare M0 M1      # rebuild comparison + index only
+#   scripts/snapshot.sh base
+#   scripts/snapshot.sh change --pages 1,2 --size 18 --lh 1.65 --dpr 2
+#   scripts/snapshot.sh --compare base change      # rebuild comparison + index only
 #
 # Options: --w 640 --h 900 --size 18 --lh 1.65 --theme 0 --justify 0|1
 #          --dpr 2 --pages 1,2,3 --note "what changed" --no-build --port 8098
@@ -43,7 +43,7 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-[ -n "$stage" ] || { echo "missing stage name, e.g. M0" >&2; exit 2; }
+[ -n "$stage" ] || { echo "missing stage name, e.g. base" >&2; exit 2; }
 
 snapdir="$root/snapshots"
 out="$snapdir/$stage"

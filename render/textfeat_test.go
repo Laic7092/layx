@@ -609,3 +609,10 @@ func TestBorderAndBackgroundInScrollTiles(t *testing.T) {
 		t.Fatal("last tile drew the top border")
 	}
 }
+
+func absF32(v float32) float32 {
+	if v < 0 {
+		return -v
+	}
+	return v
+}
