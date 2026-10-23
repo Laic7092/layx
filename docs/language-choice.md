@@ -5,7 +5,7 @@
 
 ## 一句话结论
 
-| 轴 | Go | Rust | 差距 | 值不值得 15k 行重写 |
+| 轴 | Go | Rust | 差距 | 值不值得重写 |
 |---|---|---|---:|---|
 | wasm 产物（等价 shaping-only 程序） | 6.4 MB | **0.75 MB** | 8.5× | 是 |
 | wasm 峰值内存（同语料同字体） | 112.5 MB | **5.6 MB** | 20×* | 是 |
@@ -66,8 +66,8 @@ Go 的 `GOOS=js` 目标没有线程：`GOMAXPROCS=1`，没有 shared memory 方�
 
 ## 如果移植，代价在哪
 
-1. 15,339 行 Go（`render` + `render/paint` + `render/hyphen/en`）要重写，`_test` 之外
-   的 117 个测试要重建。
+1. 10,683 行非测试 Go（`render` + `render/paint` + `render/hyphen/en`）要重写，13 个
+   测试文件、117 个测试要重建。
 2. **断行结果会变**，这是最花时间的部分。`scripts/linecmp.sh` 现在是逐行和 Chromium
    比对（纯中文 54/54、英文 42/42、日英 63/63、对话密集 70/70），它钉住的是
    `go-text` 的 UAX#14 行为 + 我们自己的标点挤压/自动间距规则。换成
