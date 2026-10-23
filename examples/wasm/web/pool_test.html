@@ -1,0 +1,163 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>layx worker pool self-check</title>
+<style>
+  body { font: 14px/1.5 ui-monospace, monospace; margin: 24px; background: #faf8f3; color: #22242a; }
+  #out { white-space: pre-wrap; }
+  .bad { color: #b3261e; }
+  #note { margin-top: 12px; color: #4a5360; }
+</style>
+</head>
+<body>
+<h1>layx worker pool self-check</h1>
+<p id="note">running…</p>
+<pre id="out"></pre>
+<script src="wasm_exec.js"></script>
+<script src="layout-pool.js"></script>
+<script>
+// Boots one layout-only wasm instance on the main thread (no canvas) to get a
+// single-instance multi-chapter baseline, then lays the same chapters out in a
+// Web Worker pool. Page totals and per-chapter page counts must match exactly.
+//
+//   pool_test.html?workers=4&chars=60000
+(async () => {
+  const q = new URLSearchParams(location.search);
+  const num = (k, d) => (q.has(k) ? Number(q.get(k)) : d);
+  const WORKERS = LayxPool.clampWorkers(q.has('workers') ? num('workers', 4) : 4);
+  const CHARS = num('chars', 60000);
+  const W = num('w', 640);
+  const H = num('h', 900);
+  const SIZE = num('size', 18);
+  const LH = num('lh', 1.65);
+  const JUSTIFY = q.get('justify') !== '0';
+
+  const note = document.getElementById('note');
+  const outEl = document.getElementById('out');
+  const failures = [];
+  const lines = [];
+
+  function check(name, ok, detail = '') {
+    if (!ok) failures.push(name + (detail ? ` (${detail})` : ''));
+    lines.push(`${ok ? 'ok  ' : 'FAIL'} ${name}${detail ? ' — ' + detail : ''}`);
+    render();
+  }
+  function render() {
+    note.textContent = failures.length ? `${failures.length} failure(s)` : 'all checks passed';
+    if (failures.length) note.className = 'bad';
+    outEl.textContent = lines.join('\n');
+  }
+  function call(name, ...args) {
+    const raw = window.layx[name](...args);
+    const out = JSON.parse(raw);
+    if (out && out.error) throw new Error(`${name}: ${out.error}`);
+    return out;
+  }
+
+  const PARAS = [
+    '这是一段用来检查 worker 池页数确定性的中文小说正文。主角走进屋子，看见桌上摊着一封没有署名的信。窗外下着雨，院子里积水映着灯光，风把门吹得吱呀作响。他站在那里，很久没有说话。',
+    '第二章的名字叫“归途”。作者用了不少短句，也用了几个长句，中间夹着 English words 和数字 2024，用来观察中西文混排与自动间距。标点符号、引号、“这样的段落”、以及省略号……都应当被正确处理。',
+    '她问他：“你打算怎么办？”他没有立刻回答，而是把信折好，放回信封里。那两个人在门口等了一会儿，最后决定明天一早再出发。雨停了，街上的灯一盏一盏地灭下去。',
+    'A paragraph of plain English follows, with some reasonably long words: extraordinary, misunderstanding, characteristically. It exists so the check also covers Latin shaping, justification and line breaking in a mixed document.',
+  ];
+  const corpus = (chars) => {
+    const out = [];
+    let n = 0;
+    for (let i = 0; n < chars; i++) {
+      const p = PARAS[i % PARAS.length];
+      out.push(p);
+      n += p.length + 1;
+    }
+    return out.join('\n').slice(0, chars);
+  };
+
+  // Main-thread baseline instance. initLayout needs no canvas; the demo's boot()
+  // is not involved.
+  const go = new Go();
+  const { instance } = await WebAssembly.instantiateStreaming(fetch('layx.wasm'), go.importObject);
+  go.run(instance);
+  while (!window.layx) await new Promise((r) => setTimeout(r, 10));
+
+  const fontBytes = new Uint8Array(await (await fetch('fonts/book.font')).arrayBuffer());
+  const init = call('initLayout', fontBytes);
+  check('initLayout (main thread, no canvas)', init.faces > 0, `${init.initMs.toFixed(1)} ms`);
+
+  const text = corpus(CHARS);
+  const chapters = LayxPool.splitChapters(text);
+  check('splitChapters', chapters.length >= 2, `${chapters.length} chapters, ${text.length} chars`);
+
+  const tBook = performance.now();
+  const book = call('benchBook', chapters, W, H, SIZE, LH, JUSTIFY);
+  check(
+    'single-instance multi-chapter baseline',
+    book.pages > 0,
+    `${book.pages} pages, ${(performance.now() - tBook).toFixed(1)} ms`,
+  );
+
+  const pool = await LayxPool.create({
+    workers: WORKERS,
+    fontBytes,
+    shareModule: q.get('share') !== '0',
+    fallbackChapter: (chapterText) => call('layoutChapter', chapterText, W, H, SIZE, LH, JUSTIFY),
+  });
+  check(
+    `pool init (${pool.size} workers)`,
+    pool.initMs >= 0,
+    `${pool.initMs.toFixed(1)} ms, compile ${pool.compileMs.toFixed(1)} ms, per-worker font parse ${pool.workerInitMs.map((v) => v.toFixed(1)).join('/')} ms`,
+  );
+  lines.push(pool.moduleShared
+    ? 'module: 主线程编译一次，WebAssembly.Module 克隆共享给所有 worker'
+    : 'module: 当前浏览器不能克隆 WebAssembly.Module，每个 worker 自行编译 wasm');
+  render();
+
+  const pooled = await pool.layout(chapters, { w: W, h: H, size: SIZE, lh: LH, justify: JUSTIFY });
+  pool.terminate();
+
+  check(
+    'pool wall clock',
+    pooled.layoutMs >= 0,
+    `${pooled.layoutMs.toFixed(1)} ms, fallbacks ${pooled.fallbacks}`,
+  );
+  check('pool page total == single instance', pooled.pages === book.pages, `${pooled.pages} vs ${book.pages}`);
+
+  const mismatches = [];
+  for (let i = 0; i < chapters.length; i++) {
+    const single = Math.round(book.chapterPages[i]);
+    if (pooled.chapterPages[i] !== single) mismatches.push(`ch${i}: ${pooled.chapterPages[i]} vs ${single}`);
+  }
+  check('per-chapter pages match single instance', mismatches.length === 0, mismatches.join('; '));
+
+  const initLine = `pool init ${pool.initMs.toFixed(1)} ms · layout ${pooled.layoutMs.toFixed(1)} ms · single ${book.layoutMs.toFixed(1)} ms layout`;
+  lines.push('');
+  lines.push(initLine);
+  render();
+  const result = {
+    kind: 'pool_test',
+    workers: pool.size,
+    moduleShared: pool.moduleShared,
+    initMs: pool.initMs,
+    layoutMs: pooled.layoutMs,
+    bookMs: book.ms,
+    pages: pooled.pages,
+    bookPages: book.pages,
+    chapterPages: pooled.chapterPages,
+    bookChapterPages: book.chapterPages,
+    failures,
+  };
+  document.body.dataset.result = JSON.stringify(result);
+  document.title = failures.length ? 'error' : 'done';
+  // The same sink ab.js uses; makes this page runnable in headless Chrome.
+  try {
+    await fetch('/__ab', { method: 'POST', body: JSON.stringify(result) });
+  } catch (_) {}
+})().catch((err) => {
+  console.error(err);
+  document.getElementById('note').textContent = 'error: ' + err.message;
+  document.getElementById('note').className = 'bad';
+  document.getElementById('out').textContent = String(err && err.stack || err);
+  document.title = 'error: ' + err.message;
+});
+</script>
+</body>
+</html>

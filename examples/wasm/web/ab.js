@@ -4,6 +4,9 @@
 //   webview = DOM + CSS multi-column, the approach a WebView-based reader uses
 //
 // Parameters: w, h (viewport incl. 40px margins), size, lh, chars, turns.
+// workers=N (N>=1) additionally splits the corpus into chapters, lays them out
+// in a Web Worker pool, and records the pool numbers next to the single-
+// instance baseline. Without `workers` the original path is unchanged.
 // The result is written as JSON into <pre id="result"> and scripts/ab.sh reads
 // it out of a --dump-dom run.
 (async () => {
@@ -15,6 +18,8 @@
   const LH = num('lh', 1.65);
   const CHARS = num('chars', 200000);
   const TURNS = num('turns', 100);
+  // workers=0 (or no parameter) keeps the original single-instance A/B path.
+  const WORKERS = q.has('workers') ? LayxPool.clampWorkers(num('workers', 0)) : 0;
   const MARGIN = 40;
   const CW = W - 2 * MARGIN;
   const CH = H - 2 * MARGIN;
@@ -41,6 +46,13 @@
 
   const text = corpus(CHARS);
   const paragraphs = text.split('\n');
+
+  // The pool and the single-instance baseline share these chapter boundaries.
+  // Chapters are paginated independently, so their page counts must be
+  // identical no matter which worker produced them.
+  const chapters = WORKERS > 0 ? LayxPool.splitChapters(text) : [];
+
+  let fontBytes = null;
 
   function pct(v, p) {
     if (!v.length) return 0;
@@ -153,13 +165,30 @@
     while (!window.layx) await new Promise((r) => setTimeout(r, 5));
 
     const fontResp = await fetch('fonts/book.font');
-    const fontBytes = new Uint8Array(await fontResp.arrayBuffer());
+    fontBytes = new Uint8Array(await fontResp.arrayBuffer());
     call('boot', canvas, overlay, fontBytes, 1);
     const bootMs = performance.now() - tBoot;
 
     const t0 = performance.now();
     const r = call('bench', text, W, H, SIZE, LH, true, TURNS);
     const totalMs = performance.now() - t0;
+
+    // Single-instance baseline for the pool: the same chapters, paginated one
+    // after another by this one wasm instance.
+    let book = null;
+    if (WORKERS > 0) {
+      const tBook = performance.now();
+      const b = call('benchBook', chapters, W, H, SIZE, LH, true);
+      book = {
+        ms: round(performance.now() - tBook),
+        buildMs: round(b.buildMs),
+        layoutMs: round(b.layoutMs),
+        pages: b.pages,
+        chapters: b.chapters,
+        chapterPages: b.chapterPages.map(Math.round),
+        wasmMB: Math.round((b.memSys / 1048576) * 10) / 10,
+      };
+    }
 
     return {
       bootMs: round(bootMs),
@@ -177,7 +206,70 @@
       repageMs: round(r.repageMs),
       wasmMB: Math.round((r.memSys / 1048576) * 10) / 10,
       heapMB: heapMB(),
+      book: book,
     };
+  }
+
+  // ------------------------------------------------------------------- pool
+
+  // The pool runs after the single-instance baseline so `native.book` is
+  // available for the page-count check. Pool initialisation (compile + N font
+  // parses) is measured by LayxPool.create and never mixed into layoutMs.
+  async function runPool(native) {
+    const note = document.getElementById('pool-note');
+    let pool = null;
+    try {
+      pool = await LayxPool.create({
+        workers: WORKERS,
+        fontBytes: fontBytes,
+        // Main-thread fallback: a chapter that fails in a worker is laid out
+        // once by the already-booted single instance.
+        fallbackChapter: (chapterText) => call('layoutChapter', chapterText, W, H, SIZE, LH, true),
+      });
+      if (note) {
+        note.textContent = pool.moduleShared
+          ? `worker 池: ${pool.size} 个 worker，WebAssembly.Module 在主线程编译一次并克隆共享`
+          : `worker 池: ${pool.size} 个 worker，当前浏览器不能克隆 WebAssembly.Module，每个 worker 自行编译 wasm`;
+      }
+      const out = await pool.layout(chapters, { w: W, h: H, size: SIZE, lh: LH, justify: true });
+      const book = native.book;
+      const chapterPagesMatch = book
+        ? out.chapterPages.length === book.chapterPages.length &&
+          out.chapterPages.every((n, i) => n === book.chapterPages[i])
+        : null;
+      return {
+        workers: pool.size,
+        initMs: round(pool.initMs),
+        compileMs: round(pool.compileMs),
+        workerInitMs: pool.workerInitMs.map(round),
+        moduleShared: pool.moduleShared,
+        layoutMs: round(out.layoutMs),
+        workerMs: round(out.workerMs),
+        pages: out.pages,
+        chapterPages: out.chapterPages,
+        chapters: out.chapters,
+        fallbacks: out.fallbacks,
+        fallbackMs: round(out.fallbackMs),
+        bookMs: book ? book.ms : null,
+        bookLayoutMs: book ? book.layoutMs : null,
+        bookPages: book ? book.pages : null,
+        bookChapterPages: book ? book.chapterPages : null,
+        pagesMatch: book ? out.pages === book.pages : null,
+        chapterPagesMatch: chapterPagesMatch,
+        speedup: book && out.layoutMs > 0 ? round(book.ms / out.layoutMs) : null,
+      };
+    } catch (err) {
+      console.error(err);
+      if (note) note.textContent = `worker 池失败，回落到单实例: ${err.message}`;
+      return {
+        workers: WORKERS,
+        error: String((err && err.message) || err),
+        fallbackToSingle: true,
+        pages: native.book ? native.book.pages : null,
+      };
+    } finally {
+      if (pool) pool.terminate();
+    }
   }
 
   function call(name, ...args) {
@@ -207,12 +299,14 @@
   const webview = runWebView();
   webview.fontLoadMs = round(fontLoadMs);
   const native = await runNative();
+  const pool = WORKERS > 0 ? await runPool(native) : null;
 
   const out = {
-    params: { w: W, h: H, size: SIZE, lh: LH, chars: text.length, paragraphs: paragraphs.length, turns: TURNS, margin: MARGIN },
+    params: { w: W, h: H, size: SIZE, lh: LH, chars: text.length, paragraphs: paragraphs.length, turns: TURNS, margin: MARGIN, workers: WORKERS, chapters: chapters.length },
     corpusChars: text.length,
     webview,
     native,
+    pool,
     heapStartMB: heapStart,
     readyMs: round(performance.now() - started),
     ua: navigator.userAgent,

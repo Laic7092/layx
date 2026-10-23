@@ -17,6 +17,10 @@
     word-break: normal;
   }
   #book p { margin: 0; text-indent: 2em; }
+  #pool-note {
+    position: absolute; left: 8px; bottom: 8px; margin: 0;
+    font: 12px/1.4 ui-monospace, monospace; color: #4a5360;
+  }
   #result { position: absolute; left: -10000px; }
 </style>
 </head>
@@ -24,8 +28,10 @@
 <div id="book"></div>
 <canvas id="page"></canvas>
 <canvas id="overlay"></canvas>
+<p id="pool-note"></p>
 <pre id="result"></pre>
 <script src="wasm_exec.js"></script>
+<script src="layout-pool.js"></script>
 <script src="ab.js"></script>
 </body>
 </html>
