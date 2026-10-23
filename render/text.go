@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"sync/atomic"
 	"unicode"
 
 	"github.com/go-text/typesetting/di"
@@ -54,6 +55,9 @@ type textWorker struct {
 	faces       []*font.Face
 	refs        []*paint.Font
 	orders      map[fontKey][]int
+	// shapes counts Shaper.Shape calls for layout benchmarks and tests. It is
+	// per Engine; a nil counter disables counting.
+	shapes *atomic.Int64
 }
 
 type fontKey struct {
@@ -152,6 +156,9 @@ func (w *textWorker) shapeRange(p *paragraph, start, end int, defaultLang langua
 			// under-measured by one glyph and justified lines overflow the
 			// right margin. Extents are therefore required here; drawing still
 			// uses the outlines directly.
+			if w.shapes != nil {
+				w.shapes.Add(1)
+			}
 			shaped := w.shaper.Shape(split)
 			out = append(out, shapedRun{out: shaped, style: seg.style, ref: w.refs[faceIndex(w.faces, shaped.Face)]})
 		}
@@ -261,6 +268,17 @@ type lineBox struct {
 	baseline float32
 	last     bool
 	align    TextAlign
+
+	// Vertical metrics captured at break time so a layout can be re-stacked
+	// with a different Typography.LineHeight without re-shaping.
+	ascent  float32
+	descent float32
+	// implicitSize is the largest font size on the line that inherits the
+	// typographic line height. explicitHeight is the largest font-size x
+	// line-height product from runs that override it. The effective line
+	// height is max(explicitHeight, implicitSize*LineHeight).
+	implicitSize   float32
+	explicitHeight float32
 }
 
 // wrapParagraph breaks p into lines of at most width pixels. It returns line
@@ -331,6 +349,8 @@ func (w *textWorker) wrapParagraph(
 			ascent        float32
 			descent       float32
 			lineHeightMax float32
+			implicitSize  float32
+			explicitHMax  float32
 		)
 		for _, out := range wrapped.Line {
 			lineWidth += float32(out.Advance) / 64
@@ -342,6 +362,13 @@ func (w *textWorker) wrapParagraph(
 			}
 			st := p.styleAt(out.Runes.Offset)
 			size := resolveFontSize(st, typo)
+			if st.LineHeight > 0 {
+				if h := size * st.LineHeight; h > explicitHMax {
+					explicitHMax = h
+				}
+			} else if size > implicitSize {
+				implicitSize = size
+			}
 			lh := st.LineHeight
 			if lh <= 0 {
 				lh = lineHeight
@@ -371,17 +398,21 @@ func (w *textWorker) wrapParagraph(
 			x += indent
 		}
 		lines = append(lines, lineBox{
-			para:     p,
-			start:    int32(lineStart),
-			end:      int32(end),
-			x:        x,
-			y:        y,
-			width:    lineWidth,
-			avail:    maxW,
-			height:   height,
-			baseline: baseline,
-			last:     done,
-			align:    align,
+			para:           p,
+			start:          int32(lineStart),
+			end:            int32(end),
+			x:              x,
+			y:              y,
+			width:          lineWidth,
+			avail:          maxW,
+			height:         height,
+			baseline:       baseline,
+			last:           done,
+			align:          align,
+			ascent:         ascent,
+			descent:        descent,
+			implicitSize:   implicitSize,
+			explicitHeight: explicitHMax,
 		})
 		y += height
 		lineStart = wrapped.NextLine

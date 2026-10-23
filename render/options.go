@@ -3,6 +3,7 @@ package render
 import (
 	"fmt"
 	"runtime"
+	"sync/atomic"
 
 	"github.com/laix/layx/render/paint"
 )
@@ -142,6 +143,10 @@ type Engine struct {
 	workers   int
 	pageCache int
 	limits    Limits
+
+	// shapes counts shaping calls. Layout variants that reuse cached line boxes
+	// must not increment it; tests use it to prove the cache works.
+	shapes atomic.Int64
 }
 
 // New creates an Engine.
