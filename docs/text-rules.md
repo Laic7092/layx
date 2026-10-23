@@ -51,9 +51,10 @@
   应能单独开关。挤压调整行内宽度分配，悬挂允许标点探出边界，二者对断行的
   影响不同。
 - 当前的 `addAutospacing`（1/8 em）是**无条件执行**的，与"零值 = 规范默认"
-  冲突，属于待修正项（见"未决"）。
-- 引擎目前对 `Widows` / `Orphans` 的默认是 2/2，这也是偏离，需按上表调整默认
-  或在文档里显式声明。
+  冲突，属于待修正项（见"实施待办"）。
+- 引擎目前对 `Widows` / `Orphans` 的默认是 2/2，同样是偏离，待改为"0 即关闭"。
+- `FirstLineIndent` 只存在于每个节点的 `Style` 上，`Typography` 不提供默认值：
+  首行缩进属于文档样式，引擎不注入。
 
 ## 开关必须进入缓存 key
 
@@ -110,10 +111,25 @@
 | margin collapsing 边界情况 | CSS 2.1 §8.3.1 | 各家实现有细节差异 | 跟规范 |
 | `text-spacing-trim` | CSS Text L4 | 实现较新，默认值在演进 | 默认 off，跟初始值 |
 
-## 未决
+## 决策
 
-1. `PunctuationCompression` 与 `HangingPunctuation` 是否拆成两个开关（倾向：拆）。
-2. `Autospacing` 默认改为 off —— 会改变现有观感，需要确认。
-3. `Widows` / `Orphans` 的零值：关闭（浏览器行为），还是 2/2（规范文本描述）？
-4. 中文首行缩进 2em 应该由 `Typography` 默认给，还是完全交给样式（倾向：交给
-   样式，核心不注入）。
+| 决定 | 结果 | 理由 |
+|---|---|---|
+| 标点挤压与行末悬挂 | **拆成两个独立开关** | 规范来源不同（`text-spacing-trim` vs `hanging-punctuation`），对断行的影响也不同 |
+| `Autospacing` 默认 | **off** | 它来自 CLREQ 的建议，不是 CSS 初始值；默认开启会让"零值 = 规范默认"失效 |
+| `Widows` / `Orphans` 零值 | **关闭（0 即不启用保护）** | 对齐浏览器实际行为；需要保护的宿主显式给值 |
+| 中文首行缩进 2em | **完全交给样式，核心不提供默认值** | 首行缩进是文档排版决策，不该由引擎注入；`Typography` 不新增该字段 |
+
+## 实施待办
+
+排在 M2 合并之后（避免与 `render/options.go` 的改动冲突）：
+
+1. `Typography.withDefaults()`：`Widows` / `Orphans` 不再把 0 提升为 2，改由
+   `paginate()` 把 0 解释为"不启用孤行/寡行保护"。
+2. 删掉 `addAutospacing` 的无条件调用，改为由开关驱动，默认 off。
+3. 核对依赖 2/2 默认值的测试（`render/layout_test.go`、`render/cjk_test.go` 里
+   断言跨页行为的部分），改为显式传值。
+4. 把影响断行的开关收进 `TextRules`，`BreakKey` 整体哈希它；补穷举测试与
+   "绘制选项不得改变 `PageKey`"的反向测试。
+5. `examples/` 里显式设置 `FirstLineIndent`（演示"由样式决定"），并在 README
+   给出中文小说推荐开关组。
