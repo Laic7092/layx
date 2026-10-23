@@ -79,6 +79,13 @@ type chapterFlow struct {
 // Layout is an immutable layout variant. Pages are rendered lazily and cached
 // up to Engine's PageCache limit; all exported methods are safe for concurrent
 // use.
+//
+// A Layout produced by Relayout shares cached line boxes and page maps with
+// the layout it came from. Only the three keys change:
+//
+//	BreakKey -> line boxes (shaping and line breaking)
+//	PageKey  -> vertical positions and page boundaries
+//	PaintKey -> display lists (colors), rebuilt lazily
 type Layout struct {
 	engine *Engine
 	doc    *Document
@@ -87,6 +94,14 @@ type Layout struct {
 	chapters []chapterFlow
 	pages    []pageInfo
 	anchors  map[AnchorID]anchorPos
+
+	variants *variantCache
+	// breakKeys has one entry per chapter: horizontal layout identity.
+	breakKeys []keyHash
+	// pageKeys has one entry per chapter: PageKey.
+	pageKeys []keyHash
+	// paintKey combines all PageKeys with the theme.
+	paintKey keyHash
 
 	pool *sync.Pool
 
@@ -97,6 +112,12 @@ type Layout struct {
 
 // Layout computes a new layout variant for doc.
 func (e *Engine) Layout(ctx context.Context, doc *Document, opts LayoutOptions) (*Layout, error) {
+	return e.layoutDoc(ctx, doc, opts, nil)
+}
+
+// layoutDoc implements Layout and Relayout. A non-nil variants cache carries
+// break and page results across Relayout calls for the same document.
+func (e *Engine) layoutDoc(ctx context.Context, doc *Document, opts LayoutOptions, variants *variantCache) (*Layout, error) {
 	if doc == nil {
 		return nil, fmt.Errorf("%w: nil document", ErrInvalidDocument)
 	}
@@ -107,8 +128,15 @@ func (e *Engine) Layout(ctx context.Context, doc *Document, opts LayoutOptions) 
 	if err != nil {
 		return nil, err
 	}
-	if err := e.checkLimits(ctx, doc); err != nil {
-		return nil, err
+	nch := len(doc.chapters)
+	if variants == nil {
+		variants = newVariantCache(nch)
+	}
+	if !variants.limitsVerified() {
+		if err := e.checkLimits(ctx, doc); err != nil {
+			return nil, err
+		}
+		variants.markLimitsVerified()
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -116,95 +144,265 @@ func (e *Engine) Layout(ctx context.Context, doc *Document, opts LayoutOptions) 
 
 	typo := opts.Typography
 	defaultLang := language.NewLanguage(doc.meta.Language)
-	plans, tasks, err := buildTasks(doc, opts, typo, defaultLang)
-	if err != nil {
-		return nil, err
-	}
 
-	results := make([]*blockBox, len(tasks))
-	errs := make([]error, len(tasks))
-	pool := &sync.Pool{New: func() any {
-		w := newTextWorker(opts.Fonts, typo)
-		w.defaultLang = defaultLang
-		return w
-	}}
-
-	workers := e.workers
-	if workers > len(tasks) {
-		workers = len(tasks)
-	}
-	if workers < 1 && len(tasks) > 0 {
-		workers = 1
-	}
-	var next atomic.Int64
-	var wg sync.WaitGroup
-	for wi := 0; wi < workers; wi++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for {
-				if ctx.Err() != nil {
-					return
-				}
-				idx := int(next.Add(1)) - 1
-				if idx < 0 || idx >= len(tasks) {
-					return
-				}
-				t := &tasks[idx]
-				ch := &doc.chapters[t.chapter]
-				w := pool.Get().(*textWorker)
-				lc := &layoutContext{
-					ctx:         ctx,
-					doc:         doc,
-					opts:        opts,
-					typo:        typo,
-					limits:      e.limits,
-					chapter:     *ch,
-					chapterIdx:  t.chapter,
-					rootStyle:   t.rootStyle,
-					defaultLang: defaultLang,
-					worker:      w,
-				}
-				var (
-					box     *blockBox
-					taskErr error
-				)
-				if t.node >= 0 {
-					box, taskErr = lc.layoutBlock(ctx, ch.Nodes, t.node, t.width, lc.rootStyle)
-				} else {
-					box, taskErr = lc.layoutInlineRun(ctx, t.tokens, t.style, t.width)
-				}
-				pool.Put(w)
-				if taskErr != nil {
-					errs[idx] = taskErr
-					continue
-				}
-				results[idx] = box
+	// Pass 1: derive the three keys. Hashing walks the document but does no
+	// shaping, so it is cheap even for a 5M-rune book.
+	keyer := variants.newKeyer()
+	contentH := contentHeight(opts)
+	breakKeys := make([]keyHash, nch)
+	pageKeys := make([]keyHash, nch)
+	for ci := 0; ci < nch; ci++ {
+		if ci%32 == 0 {
+			if err := ctx.Err(); err != nil {
+				return nil, err
 			}
-		}()
+		}
+		ch := &doc.chapters[ci]
+		breakKeys[ci] = chapterBreakKey(keyer, doc, ch, opts, typo)
+		pageKeys[ci] = pageKey(keyer, breakKeys[ci], typo, contentH)
 	}
-	wg.Wait()
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	for i, err := range errs {
-		if err != nil {
-			return nil, fmt.Errorf("layout task %d: %w", i, err)
+	currentPaintKey := paintKey(keyer, pageKeys, typo)
+
+	// Pass 2: find cached line boxes. Only chapters whose BreakKey is absent
+	// need shaping.
+	breaks := make([]*breakChapter, nch)
+	needBreak := make([]bool, nch)
+	anyBreak := false
+	for ci := 0; ci < nch; ci++ {
+		key := cacheKey{chapter: ci, fonts: opts.Fonts, key: breakKeys[ci]}
+		if bc := variants.getBreak(key); bc != nil {
+			breaks[ci] = bc
+		} else {
+			needBreak[ci] = true
+			anyBreak = true
 		}
 	}
 
-	l := &Layout{
-		engine:  e,
-		doc:     doc,
-		opts:    opts,
-		pool:    pool,
-		cache:   make(map[int]*Page),
-		anchors: make(map[AnchorID]anchorPos),
+	pool := &sync.Pool{New: func() any {
+		w := newTextWorker(opts.Fonts, typo)
+		w.defaultLang = defaultLang
+		w.shapes = &e.shapes
+		return w
+	}}
+
+	if anyBreak {
+		explicit := make([]map[NodeID]float32, nch)
+		for ci := range doc.chapters {
+			if needBreak[ci] {
+				explicit[ci] = explicitLineHeights(doc, &doc.chapters[ci])
+			}
+		}
+		plans, tasks, err := buildTasks(doc, opts, typo, defaultLang, needBreak)
+		if err != nil {
+			return nil, err
+		}
+
+		results := make([]*breakBox, len(tasks))
+		errs := make([]error, len(tasks))
+
+		workers := e.workers
+		if workers > len(tasks) {
+			workers = len(tasks)
+		}
+		if workers < 1 && len(tasks) > 0 {
+			workers = 1
+		}
+		var next atomic.Int64
+		var wg sync.WaitGroup
+		for wi := 0; wi < workers; wi++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for {
+					if ctx.Err() != nil {
+						return
+					}
+					idx := int(next.Add(1)) - 1
+					if idx < 0 || idx >= len(tasks) {
+						return
+					}
+					t := &tasks[idx]
+					ch := &doc.chapters[t.chapter]
+					w := pool.Get().(*textWorker)
+					inline := &layoutContext{
+						ctx:         ctx,
+						doc:         doc,
+						opts:        opts,
+						typo:        typo,
+						limits:      e.limits,
+						chapter:     *ch,
+						chapterIdx:  t.chapter,
+						rootStyle:   t.rootStyle,
+						defaultLang: defaultLang,
+					}
+					bc := &breakContext{
+						ctx:         ctx,
+						doc:         doc,
+						typo:        typo,
+						chapter:     *ch,
+						defaultLang: defaultLang,
+						limits:      e.limits,
+						worker:      w,
+						inline:      inline,
+						explicitLH:  explicit[t.chapter],
+					}
+					var (
+						box     *breakBox
+						taskErr error
+					)
+					if t.node >= 0 {
+						box, taskErr = bc.block(ch.Nodes, t.node, t.width, t.rootStyle)
+					} else {
+						box, taskErr = bc.inlineRun(t.tokens, t.style, t.width)
+					}
+					pool.Put(w)
+					if taskErr != nil {
+						errs[idx] = taskErr
+						continue
+					}
+					results[idx] = box
+				}
+			}()
+		}
+		wg.Wait()
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		for i, err := range errs {
+			if err != nil {
+				return nil, fmt.Errorf("layout task %d: %w", i, err)
+			}
+		}
+		for pi := range plans {
+			plan := &plans[pi]
+			units := make([]breakUnit, 0, len(plan.units))
+			for _, ti := range plan.units {
+				box := results[ti]
+				if box == nil {
+					return nil, fmt.Errorf("%w: chapter %q produced no layout", ErrInvalidDocument, doc.chapters[plan.chapter].ID)
+				}
+				units = append(units, unitFromBox(box))
+			}
+			bc := &breakChapter{key: breakKeys[plan.chapter], units: units}
+			breaks[plan.chapter] = bc
+			variants.putBreak(cacheKey{chapter: plan.chapter, fonts: opts.Fonts, key: breakKeys[plan.chapter]}, bc)
+		}
 	}
-	if err := l.assemble(ctx, plans, results, typo, defaultLang); err != nil {
-		return nil, err
+
+	// Pass 3: reuse complete page maps when PageKey is unchanged, otherwise
+	// re-stack the cached line boxes and re-paginate.
+	laid := make([]*laidChapter, nch)
+	needPage := make([]bool, nch)
+	for ci := 0; ci < nch; ci++ {
+		key := cacheKey{chapter: ci, fonts: opts.Fonts, key: pageKeys[ci]}
+		if lc := variants.getPage(key); lc != nil {
+			laid[ci] = lc
+		} else {
+			needPage[ci] = true
+		}
+	}
+	for ci := 0; ci < nch; ci++ {
+		if !needPage[ci] {
+			continue
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		ch := &doc.chapters[ci]
+		root := &ch.Nodes[ch.Root]
+		rootStyle := resolveStyle(doc.style(root.Style), typo)
+		lc, err := e.layChapter(ctx, ch, ci, breaks[ci], rootStyle, typo, contentH)
+		if err != nil {
+			return nil, err
+		}
+		laid[ci] = lc
+		variants.putPage(cacheKey{chapter: ci, fonts: opts.Fonts, key: pageKeys[ci]}, lc)
+	}
+
+	l := &Layout{
+		engine:    e,
+		doc:       doc,
+		opts:      opts,
+		pool:      pool,
+		cache:     make(map[int]*Page),
+		anchors:   make(map[AnchorID]anchorPos),
+		variants:  variants,
+		breakKeys: breakKeys,
+		pageKeys:  pageKeys,
+		paintKey:  currentPaintKey,
+	}
+	l.chapters = make([]chapterFlow, nch)
+	for ci := 0; ci < nch; ci++ {
+		ch := &doc.chapters[ci]
+		root := &ch.Nodes[ch.Root]
+		rootStyle := resolveStyle(doc.style(root.Style), typo)
+		lc := laid[ci]
+		cf := chapterFlow{
+			chapter:    *ch,
+			items:      lc.items,
+			paras:      lc.paras,
+			placements: lc.placements,
+			nodePlace:  lc.nodePlace,
+			nodeFirst:  lc.nodeFirst,
+			nodeAnchor: lc.nodeAnchor,
+			anchors:    lc.anchors,
+			height:     lc.height,
+			pages:      lc.pages,
+			firstPage:  len(l.pages),
+			contentTop: rootStyle.MarginTop,
+		}
+		l.pages = append(l.pages, lc.pages...)
+		for id, pos := range lc.anchors {
+			if _, exists := l.anchors[id]; !exists {
+				l.anchors[id] = pos
+			}
+		}
+		l.chapters[ci] = cf
 	}
 	return l, nil
+}
+
+// layChapter turns cached line boxes into flow items, positions them with the
+// current vertical typography, and paginates. It does not shape.
+func (e *Engine) layChapter(
+	ctx context.Context,
+	ch *Chapter,
+	ci int,
+	bc *breakChapter,
+	rootStyle Style,
+	typo Typography,
+	contentH float32,
+) (*laidChapter, error) {
+	items, paras, height := stackBreakUnits(bc.units, typo.ParagraphGap, typo)
+	xShift := rootStyle.MarginLeft
+	yShift := rootStyle.MarginTop
+	for i := range items {
+		items[i].x += xShift
+		items[i].y += yShift
+	}
+
+	place := bc.placementsFor(ch, ci, items, paras)
+	lc := &laidChapter{
+		items:      items,
+		paras:      paras,
+		height:     height + yShift + rootStyle.MarginBottom,
+		placements: place.placements,
+		nodePlace:  place.nodePlace,
+		nodeFirst:  place.nodeFirst,
+		nodeAnchor: place.nodeAnchor,
+		anchors:    place.anchors,
+	}
+	lc.pages = paginate(ctx, items, contentH, typo)
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	for pi := range lc.pages {
+		lc.pages[pi].chapter = ci
+	}
+	return lc, nil
 }
 
 type layoutTask struct {
@@ -223,12 +421,15 @@ type layoutPlan struct {
 	units     []int
 }
 
-func buildTasks(doc *Document, opts LayoutOptions, typo Typography, defaultLang language.Language) ([]layoutPlan, []layoutTask, error) {
+func buildTasks(doc *Document, opts LayoutOptions, typo Typography, defaultLang language.Language, need []bool) ([]layoutPlan, []layoutTask, error) {
 	var (
 		tasks []layoutTask
 		plans []layoutPlan
 	)
 	for ci := range doc.chapters {
+		if need != nil && !need[ci] {
+			continue
+		}
 		ch := &doc.chapters[ci]
 		nodes := ch.Nodes
 		root := &nodes[ch.Root]
@@ -280,49 +481,435 @@ func buildTasks(doc *Document, opts LayoutOptions, typo Typography, defaultLang 
 	return plans, tasks, nil
 }
 
-func (l *Layout) assemble(ctx context.Context, plans []layoutPlan, results []*blockBox, typo Typography, defaultLang language.Language) error {
-	l.chapters = make([]chapterFlow, len(plans))
-	for ci := range plans {
-		if err := ctx.Err(); err != nil {
+// breakKit distinguishes the payload of a breakUnit.
+type breakKit uint8
+
+const (
+	breakLines breakKit = iota
+	breakImage
+	breakBlockUnit
+)
+
+// lineBreak is one line box without vertical placement. Height and baseline
+// are derived when the line is stacked, so changing LineHeight never requires
+// re-breaking or re-shaping.
+type lineBreak struct {
+	start, end int32
+	x          float32
+	width      float32
+	avail      float32
+	last       bool
+	align      TextAlign
+
+	ascent  float32
+	descent float32
+	// implicitSize is the largest font size inheriting Typography.LineHeight;
+	// explicitHeight is the largest size*lineHeight from overriding styles.
+	implicitSize   float32
+	explicitHeight float32
+}
+
+// breakUnit is one vertical slot in a block. It is the cacheable counterpart
+// of flow.go's unit: the same structure, but line heights are not baked in.
+type breakUnit struct {
+	kind  breakKit
+	para  *paragraph
+	lines []lineBreak
+	image flowItem
+	box   *breakBox
+
+	xOffset      float32
+	marginTop    float32
+	marginBottom float32
+	// gapBottom means marginBottom is the default paragraph gap, which must be
+	// re-read from the current Typography when the unit is stacked.
+	gapBottom       bool
+	breakBefore     bool
+	breakAfter      bool
+	keepTogether    bool
+	widows, orphans int
+}
+
+// breakBox mirrors flow.go's blockBox without stacking its children.
+type breakBox struct {
+	units        []breakUnit
+	style        Style
+	width        float32
+	xOffset      float32
+	marginTop    float32
+	marginBottom float32
+	breakBefore  bool
+	breakAfter   bool
+	keepTogether bool
+}
+
+func unitFromBox(box *breakBox) breakUnit {
+	return breakUnit{
+		kind:         breakBlockUnit,
+		box:          box,
+		xOffset:      box.xOffset,
+		marginTop:    box.marginTop,
+		marginBottom: box.marginBottom,
+		breakBefore:  box.breakBefore,
+		breakAfter:   box.breakAfter,
+		keepTogether: box.keepTogether,
+	}
+}
+
+// lineMetrics applies the current LineHeight to a cached line.
+func lineMetrics(ln *lineBreak, typo Typography) (height, baseline float32) {
+	lhMax := ln.explicitHeight
+	if ln.implicitSize > 0 {
+		if h := ln.implicitSize * typo.LineHeight; h > lhMax {
+			lhMax = h
+		}
+	}
+	height = lhMax
+	if minH := ln.ascent + ln.descent; height < minH {
+		height = minH
+	}
+	leading := height - ln.ascent - ln.descent
+	if leading < 0 {
+		leading = 0
+	}
+	baseline = ln.ascent + leading/2
+	return height, baseline
+}
+
+// countBreakUnits sizes the flow item and paragraph slices up front. Without
+// it, every nested block would append into its own growing slice and the
+// parent would copy the result again: on a 5M-rune book that costs hundreds of
+// megabytes per relayout.
+func countBreakUnits(units []breakUnit) (items, paras int) {
+	for i := range units {
+		u := &units[i]
+		switch u.kind {
+		case breakLines:
+			items += len(u.lines)
+			if u.para != nil {
+				paras++
+			}
+		case breakImage:
+			items++
+		case breakBlockUnit:
+			bi, bp := countBreakUnits(u.box.units)
+			items += bi
+			paras += bp
+		}
+	}
+	return items, paras
+}
+
+// stackBreakUnits is the cache-friendly equivalent of flow.go's stackUnits.
+// The arithmetic matches stackUnits exactly so that a cached relayout and a
+// full layout produce identical line boxes and page boundaries.
+func stackBreakUnits(units []breakUnit, defaultGap float32, typo Typography) (items []flowItem, paras []*paragraph, height float32) {
+	nItems, nParas := countBreakUnits(units)
+	items = make([]flowItem, 0, nItems)
+	paras = make([]*paragraph, 0, nParas)
+	height = appendBreakUnits(units, defaultGap, typo, &items, &paras)
+	return items, paras, height
+}
+
+func appendBreakUnits(units []breakUnit, defaultGap float32, typo Typography, items *[]flowItem, paras *[]*paragraph) float32 {
+	cursor := float32(0)
+	prevBottom := float32(0)
+	start := len(*items)
+	for i := range units {
+		u := &units[i]
+		bottom := u.marginBottom
+		if u.gapBottom {
+			bottom = defaultGap
+		}
+		gap := u.marginTop
+		if i > 0 {
+			gap = maxF32(prevBottom, u.marginTop)
+			if gap == 0 {
+				gap = defaultGap
+			}
+		}
+		cursor += gap
+		base := len(*items)
+		// keepGroup is local to this unit list, matching stackUnits' use of
+		// the index inside the nested slice.
+		group := int32(base - start)
+		switch u.kind {
+		case breakLines:
+			y := float32(0)
+			for li := range u.lines {
+				ln := &u.lines[li]
+				h, baseline := lineMetrics(ln, typo)
+				*items = append(*items, flowItem{
+					kind:      itemLine,
+					para:      u.para,
+					start:     ln.start,
+					end:       ln.end,
+					x:         ln.x + u.xOffset,
+					y:         cursor + y,
+					width:     ln.width,
+					avail:     ln.avail,
+					height:    h,
+					baseline:  baseline,
+					last:      ln.last,
+					align:     ln.align,
+					paraLine:  int32(li),
+					paraLines: int32(len(u.lines)),
+					widows:    u.widows,
+					orphans:   u.orphans,
+				})
+				y += h
+			}
+			cursor += y
+			if u.para != nil {
+				*paras = append(*paras, u.para)
+			}
+		case breakImage:
+			it := u.image
+			it.x += u.xOffset
+			it.y += cursor
+			*items = append(*items, it)
+			cursor += it.height
+		case breakBlockUnit:
+			mark := len(*items)
+			bh := appendBreakUnits(u.box.units, defaultGap, typo, items, paras)
+			for j := mark; j < len(*items); j++ {
+				(*items)[j].x += u.xOffset
+				(*items)[j].y += cursor
+			}
+			cursor += bh
+		}
+		if len(*items) > base {
+			if u.breakBefore {
+				(*items)[base].breakBefore = true
+			}
+			if u.breakAfter {
+				(*items)[len(*items)-1].breakAfter = true
+			}
+			if u.keepTogether {
+				for k := base; k < len(*items); k++ {
+					(*items)[k].keepTogether = true
+					(*items)[k].keepGroup = group
+				}
+			}
+		}
+		prevBottom = bottom
+	}
+	return cursor
+}
+
+// breakContext is the per-task state for shaping and line breaking. It only
+// produces break units; vertical placement happens later in layChapter.
+type breakContext struct {
+	ctx         context.Context
+	doc         *Document
+	typo        Typography
+	chapter     Chapter
+	defaultLang language.Language
+	limits      Limits
+	worker      *textWorker
+	inline      *layoutContext
+	explicitLH  map[NodeID]float32
+}
+
+func (bc *breakContext) block(nodes []Node, id NodeID, parentWidth float32, parentStyle Style) (*breakBox, error) {
+	if id < 0 || int(id) >= len(nodes) {
+		return nil, fmt.Errorf("%w: block node %d out of range", ErrInvalidDocument, id)
+	}
+	n := &nodes[id]
+	st := inheritStyle(parentStyle, bc.doc.style(n.Style), bc.typo)
+	contentW := parentWidth - st.MarginLeft - st.MarginRight
+	if contentW <= 0 {
+		return nil, fmt.Errorf("%w: block %d has non-positive content width", ErrInvalidDocument, id)
+	}
+	box := &breakBox{
+		style:        st,
+		width:        contentW,
+		xOffset:      st.MarginLeft,
+		marginTop:    st.MarginTop,
+		marginBottom: st.MarginBottom,
+		breakBefore:  st.BreakBefore,
+		breakAfter:   st.BreakAfter,
+		keepTogether: st.KeepTogether,
+	}
+
+	var (
+		units   []breakUnit
+		pending []inlineToken
+	)
+	flush := func() error {
+		if len(pending) == 0 {
+			return nil
+		}
+		us, err := bc.tokens(pending, contentW, st)
+		if err != nil {
 			return err
 		}
-		plan := &plans[ci]
-		ch := l.doc.chapters[ci]
-		units := make([]unit, 0, len(plan.units))
-		for _, ti := range plan.units {
-			box := results[ti]
-			if box == nil {
-				return fmt.Errorf("%w: chapter %q produced no layout", ErrInvalidDocument, ch.ID)
+		units = append(units, us...)
+		pending = pending[:0]
+		return nil
+	}
+
+	for _, child := range n.Children {
+		if child < 0 || int(child) >= len(nodes) {
+			return nil, fmt.Errorf("%w: child %d out of range", ErrInvalidDocument, child)
+		}
+		cn := &nodes[child]
+		if cn.Kind == NodeBlock {
+			if err := flush(); err != nil {
+				return nil, err
 			}
-			units = append(units, unit{
-				items:        box.items,
-				paras:        box.paras,
-				xOffset:      box.xOffset,
-				height:       box.height,
-				marginTop:    box.marginTop,
-				marginBottom: box.marginBottom,
-				breakBefore:  box.breakBefore,
-				breakAfter:   box.breakAfter,
-				keepTogether: box.keepTogether,
-			})
+			cb, err := bc.block(nodes, child, contentW, st)
+			if err != nil {
+				return nil, err
+			}
+			units = append(units, unitFromBox(cb))
+			continue
 		}
-		items, paras, height := stackUnits(units, typo.ParagraphGap)
-		xShift := plan.rootStyle.MarginLeft
-		yShift := plan.rootStyle.MarginTop
-		for i := range items {
-			items[i].x += xShift
-			items[i].y += yShift
+		if err := bc.inline.flattenInline(nodes, []NodeID{child}, st, n.Lang, &pending); err != nil {
+			return nil, err
 		}
+	}
+	if err := flush(); err != nil {
+		return nil, err
+	}
+	box.units = units
+	return box, nil
+}
+
+func (bc *breakContext) inlineRun(tokens []inlineToken, parent Style, width float32) (*breakBox, error) {
+	units, err := bc.tokens(tokens, width, parent)
+	if err != nil {
+		return nil, err
+	}
+	return &breakBox{units: units, style: parent, width: width}, nil
+}
+
+func (bc *breakContext) tokens(tokens []inlineToken, width float32, blockStyle Style) ([]breakUnit, error) {
+	var units []breakUnit
+	for i := 0; i < len(tokens); {
+		tok := &tokens[i]
+		switch tok.kind {
+		case tokenBreak:
+			i++
+		case tokenImage:
+			u, ok, err := bc.imageUnit(tok, width, blockStyle)
+			if err != nil {
+				return nil, err
+			}
+			if ok {
+				units = append(units, u)
+			}
+			i++
+		case tokenText:
+			j := i
+			for j < len(tokens) && tokens[j].kind == tokenText {
+				j++
+			}
+			p := &paragraph{style: blockStyle}
+			for k := i; k < j; k++ {
+				t := &tokens[k]
+				start := int32(len(p.text))
+				p.text = append(p.text, t.text...)
+				st := t.style
+				// Vertical styling is re-applied at stack time. Store only the
+				// document's explicit multiplier (zero means "inherit typo").
+				st.LineHeight = bc.explicitLH[t.node]
+				p.segs = append(p.segs, paraSeg{
+					node: t.node, style: st,
+					start: start, end: int32(len(p.text)),
+					lang: t.lang, link: t.link,
+				})
+			}
+			lines, err := bc.worker.wrapParagraph(bc.ctx, p, width, bc.typo, blockStyle, bc.defaultLang)
+			if err != nil {
+				return nil, err
+			}
+			if len(lines) > 0 {
+				u := breakUnit{
+					kind:    breakLines,
+					para:    p,
+					widows:  blockStyle.Widows,
+					orphans: blockStyle.Orphans,
+				}
+				for li := range lines {
+					ln := &lines[li]
+					u.lines = append(u.lines, lineBreak{
+						start:          ln.start,
+						end:            ln.end,
+						x:              ln.x,
+						width:          ln.width,
+						avail:          ln.avail,
+						last:           ln.last,
+						align:          ln.align,
+						ascent:         ln.ascent,
+						descent:        ln.descent,
+						implicitSize:   ln.implicitSize,
+						explicitHeight: ln.explicitHeight,
+					})
+				}
+				if j < len(tokens) && tokens[j].kind == tokenBreak {
+					u.marginBottom = 0
+				} else {
+					u.gapBottom = true
+					u.marginBottom = bc.typo.ParagraphGap
+				}
+				units = append(units, u)
+			}
+			i = j
+		}
+	}
+	return units, nil
+}
+
+func (bc *breakContext) imageUnit(tok *inlineToken, width float32, blockStyle Style) (breakUnit, bool, error) {
+	if tok.w <= 0 && tok.h <= 0 {
+		return breakUnit{}, false, nil
+	}
+	w, h := tok.w, tok.h
+	if w <= 0 && h > 0 {
+		w = width
+	}
+	if w > width {
+		if h > 0 {
+			h *= width / w
+		}
+		w = width
+	}
+	if h <= 0 {
+		h = w
+	}
+	pixels := int64(w * h)
+	if bc.limits.MaxImagePixels > 0 && pixels > bc.limits.MaxImagePixels {
+		return breakUnit{}, false, fmt.Errorf("%w: image %d is %d pixels", ErrLimitExceeded, tok.node, pixels)
+	}
+	x := float32(0)
+	align := blockStyle.TextAlign
+	switch align {
+	case AlignRight:
+		x = width - w
+	case AlignCenter:
+		x = (width - w) / 2
+	}
+	it := flowItem{
+		kind: itemImage, node: tok.node, image: tok.image,
+		x: x, width: w, height: h, link: tok.link,
+	}
+	return breakUnit{kind: breakImage, image: it}, true, nil
+}
+
+// placementsFor computes the node/anchor maps once per BreakKey. Item order is
+// identical for every PageKey derived from the same line boxes, so a
+// LineHeight or paragraph-gap change does not repeat this O(lines) work.
+func (bc *breakChapter) placementsFor(ch *Chapter, ci int, items []flowItem, paras []*paragraph) *chapterPlacements {
+	bc.placeOnce.Do(func() {
 		cf := chapterFlow{
-			chapter:    ch,
+			chapter:    *ch,
 			items:      items,
 			paras:      paras,
-			height:     height + yShift + plan.rootStyle.MarginBottom,
-			contentTop: yShift,
-			nodePlace:  make(map[NodeID]int32),
-			nodeFirst:  make(map[NodeID]int32),
-			nodeAnchor: make(map[NodeID]AnchorID),
-			anchors:    make(map[AnchorID]anchorPos),
+			nodePlace:  make(map[NodeID]int32, len(ch.Nodes)),
+			nodeFirst:  make(map[NodeID]int32, len(ch.Nodes)),
+			nodeAnchor: make(map[NodeID]AnchorID, len(ch.Anchors)),
+			anchors:    make(map[AnchorID]anchorPos, len(ch.Anchors)),
 		}
 		buildPlacements(&cf)
 		for id, node := range ch.Anchors {
@@ -331,22 +918,16 @@ func (l *Layout) assemble(ctx context.Context, plans []layoutPlan, results []*bl
 			if cur, exists := cf.nodeAnchor[node]; !exists || id < cur {
 				cf.nodeAnchor[node] = id
 			}
-			if _, exists := l.anchors[id]; !exists {
-				l.anchors[id] = pos
-			}
 		}
-		cf.pages = paginate(ctx, cf.items, contentHeight(l.opts), typo)
-		if err := ctx.Err(); err != nil {
-			return err
+		bc.place = &chapterPlacements{
+			placements: cf.placements,
+			nodePlace:  cf.nodePlace,
+			nodeFirst:  cf.nodeFirst,
+			nodeAnchor: cf.nodeAnchor,
+			anchors:    cf.anchors,
 		}
-		for pi := range cf.pages {
-			cf.pages[pi].chapter = ci
-		}
-		cf.firstPage = len(l.pages)
-		l.pages = append(l.pages, cf.pages...)
-		l.chapters[ci] = cf
-	}
-	return nil
+	})
+	return bc.place
 }
 
 func buildPlacements(cf *chapterFlow) {
@@ -356,7 +937,8 @@ func buildPlacements(cf *chapterFlow) {
 			parents[c] = NodeID(i)
 		}
 	}
-	byPara := make(map[*paragraph]int)
+	byPara := make(map[*paragraph]int, len(cf.paras))
+	cf.placements = make([]paraPlacement, 0, len(cf.paras))
 	for idx, it := range cf.items {
 		switch it.kind {
 		case itemLine:
@@ -643,9 +1225,9 @@ func (cf *chapterFlow) itemOf(loc Location) (int, bool) {
 }
 
 // Relayout computes a new layout with different options. The receiver is not
-// modified.
+// modified. Line boxes and page maps are reused when their keys are unchanged.
 func (l *Layout) Relayout(ctx context.Context, opts LayoutOptions) (*Layout, error) {
-	return l.engine.Layout(ctx, l.doc, opts)
+	return l.engine.layoutDoc(ctx, l.doc, opts, l.variants)
 }
 
 // Selection returns the page rectangles covering the rune range from..to.
