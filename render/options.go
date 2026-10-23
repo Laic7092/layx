@@ -1,0 +1,174 @@
+package render
+
+import (
+	"fmt"
+	"runtime"
+
+	"github.com/laix/layx/render/paint"
+)
+
+// Options configures an Engine.
+type Options struct {
+	// Workers is the maximum number of layout workers. 0 means GOMAXPROCS.
+	Workers int
+	// PageCache is the number of rendered pages cached per Layout. 0 uses 4.
+	PageCache int
+	Limits    Limits
+}
+
+// Limits bounds the resources consumed by a single Layout call. A zero field
+// uses the corresponding default.
+type Limits struct {
+	MaxNodes       int
+	MaxDepth       int
+	MaxTextRunes   int
+	MaxImagePixels int64
+}
+
+// DefaultLimits returns the limits used for zero-valued Limits fields.
+func DefaultLimits() Limits {
+	return Limits{
+		MaxNodes:       1 << 20,
+		MaxDepth:       256,
+		MaxTextRunes:   20_000_000,
+		MaxImagePixels: 64 << 20,
+	}
+}
+
+func (l Limits) withDefaults() Limits {
+	d := DefaultLimits()
+	if l.MaxNodes <= 0 {
+		l.MaxNodes = d.MaxNodes
+	}
+	if l.MaxDepth <= 0 {
+		l.MaxDepth = d.MaxDepth
+	}
+	if l.MaxTextRunes <= 0 {
+		l.MaxTextRunes = d.MaxTextRunes
+	}
+	if l.MaxImagePixels <= 0 {
+		l.MaxImagePixels = d.MaxImagePixels
+	}
+	return l
+}
+
+// Viewport is the page or window size in CSS pixels.
+type Viewport struct {
+	Width, Height float32
+}
+
+// Typography carries document-wide defaults. Per-node styles override them.
+type Typography struct {
+	FontFamily    string
+	FontSize      float32
+	LineHeight    float32
+	LetterSpacing float32
+	// ParagraphGap is inserted between top-level block units when their own
+	// margins are zero.
+	ParagraphGap float32
+	TextAlign    TextAlign
+	Color        paint.Color
+	// Background is painted behind each page. A transparent value means the
+	// host is responsible for the page background.
+	Background paint.Color
+	// Widows and Orphans are page-break defaults. Zero uses 2 and 2.
+	Widows  int
+	Orphans int
+}
+
+func (t Typography) withDefaults() Typography {
+	if t.FontFamily == "" {
+		t.FontFamily = "default"
+	}
+	if t.FontSize <= 0 {
+		t.FontSize = 18
+	}
+	if t.LineHeight <= 0 {
+		t.LineHeight = 1.5
+	}
+	if t.TextAlign == AlignDefault || t.TextAlign > AlignJustify {
+		t.TextAlign = AlignLeft
+	}
+	if t.Color.Transparent() {
+		t.Color = paint.Color{R: 0, G: 0, B: 0, A: 0xff}
+	}
+	if t.Widows <= 0 {
+		t.Widows = 2
+	}
+	if t.Orphans <= 0 {
+		t.Orphans = 2
+	}
+	return t
+}
+
+// LayoutOptions describes one layout variant.
+type LayoutOptions struct {
+	Viewport   Viewport
+	Typography Typography
+	Fonts      *FontSet
+	// Margins are page margins in CSS pixels.
+	Margins paint.Insets
+}
+
+func (o LayoutOptions) validate() (LayoutOptions, error) {
+	if o.Viewport.Width <= 0 || o.Viewport.Height <= 0 {
+		return o, fmt.Errorf("%w: viewport must be positive", ErrInvalidOptions)
+	}
+	contentW := o.Viewport.Width - o.Margins.Left - o.Margins.Right
+	contentH := o.Viewport.Height - o.Margins.Top - o.Margins.Bottom
+	if contentW <= 0 || contentH <= 0 {
+		return o, fmt.Errorf("%w: margins leave no content box", ErrInvalidOptions)
+	}
+	if o.Margins.Left < 0 || o.Margins.Right < 0 || o.Margins.Top < 0 || o.Margins.Bottom < 0 {
+		return o, fmt.Errorf("%w: margins must not be negative", ErrInvalidOptions)
+	}
+	if o.Fonts == nil {
+		return o, fmt.Errorf("%w: Fonts is required", ErrNoFonts)
+	}
+	o.Typography = o.Typography.withDefaults()
+	return o, nil
+}
+
+func contentWidth(o LayoutOptions) float32 {
+	return o.Viewport.Width - o.Margins.Left - o.Margins.Right
+}
+
+func contentHeight(o LayoutOptions) float32 {
+	return o.Viewport.Height - o.Margins.Top - o.Margins.Bottom
+}
+
+// Engine owns layout workers and configuration. It holds no document state.
+type Engine struct {
+	workers   int
+	pageCache int
+	limits    Limits
+}
+
+// New creates an Engine.
+func New(opts Options) (*Engine, error) {
+	if opts.Workers < 0 {
+		return nil, fmt.Errorf("%w: negative worker count", ErrInvalidOptions)
+	}
+	if opts.PageCache < 0 {
+		return nil, fmt.Errorf("%w: negative page cache size", ErrInvalidOptions)
+	}
+	workers := opts.Workers
+	if workers == 0 {
+		workers = runtime.GOMAXPROCS(0)
+	}
+	if workers < 1 {
+		workers = 1
+	}
+	pageCache := opts.PageCache
+	if pageCache == 0 {
+		pageCache = 4
+	}
+	return &Engine{
+		workers:   workers,
+		pageCache: pageCache,
+		limits:    opts.Limits.withDefaults(),
+	}, nil
+}
+
+// Workers returns the configured worker count.
+func (e *Engine) Workers() int { return e.workers }

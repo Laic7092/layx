@@ -1,0 +1,333 @@
+// Package render is a reflowable document layout and rendering engine.
+//
+// It consumes an already parsed and cascaded Document (the IR produced by a
+// host or compiler) and produces pages made of drawing commands. It does not
+// parse EPUB, XHTML or CSS, and it does not contain a rasterizer.
+//
+// A Document, FontSet and Layout are immutable after construction except for
+// internal caches. They are safe for concurrent use once built.
+package render
+
+import (
+	"errors"
+	"fmt"
+
+	"github.com/laix/layx/render/paint"
+)
+
+// NodeID identifies a node inside a Chapter.
+type NodeID int32
+
+// InvalidNode is the zero-value-invalid NodeID.
+const InvalidNode NodeID = -1
+
+// StyleID identifies an entry in Document.Styles.
+type StyleID uint32
+
+// AnchorID is a host-owned identifier that can be resolved back to a node and
+// a rune offset. Zero means "no anchor".
+type AnchorID uint32
+
+// NoAnchor is the zero AnchorID.
+const NoAnchor AnchorID = 0
+
+// ImageID is an opaque host image handle.
+type ImageID = paint.ImageID
+
+// NodeKind describes the role of a Node.
+type NodeKind uint8
+
+const (
+	// NodeBlock is a block container. Its children are laid out vertically.
+	NodeBlock NodeKind = iota
+	// NodeInline is an inline container. Its children participate in the
+	// surrounding paragraph.
+	NodeInline
+	// NodeText is a run of text.
+	NodeText
+	// NodeImage is a replaced element.
+	NodeImage
+	// NodeBreak is a forced line break (like <br>).
+	NodeBreak
+)
+
+// Node is one entry in the flat node arena of a Chapter.
+//
+// Nodes are intentionally simple: the host is expected to resolve CSS,
+// inheritance and selectors before building the IR.
+type Node struct {
+	Kind     NodeKind
+	Style    StyleID
+	Text     string
+	Children []NodeID
+	Image    ImageID
+	// Width and Height are the intrinsic or CSS-specified size of a NodeImage,
+	// in CSS pixels. Height may be zero if the host knows only one dimension.
+	Width  float32
+	Height float32
+	Anchor AnchorID
+	// Lang is an optional BCP 47 tag for this node. It overrides the document
+	// language for shaping.
+	Lang string
+	// Link is an optional host URL. It does not affect layout.
+	Link string
+}
+
+// Chapter is one independently paginated unit, usually one spine item.
+type Chapter struct {
+	ID    string
+	Root  NodeID
+	Nodes []Node
+	// Anchors maps host anchors to nodes. Offsets within a node are carried by
+	// Location.Offset, not by this table.
+	Anchors map[AnchorID]NodeID
+}
+
+// Metadata carries document-level hints.
+type Metadata struct {
+	// Language is a BCP 47 tag such as "zh-CN" or "en".
+	Language string
+	// Title is informational and not used by layout.
+	Title string
+	// Reflowable must be true; the engine only supports reflowable documents.
+	Reflowable bool
+}
+
+// Document is the immutable input to Engine.Layout.
+//
+// Build documents with DocumentBuilder rather than constructing the struct
+// directly: the builder validates node graphs and copies slices.
+type Document struct {
+	styles   []Style
+	chapters []Chapter
+	meta     Metadata
+}
+
+// Styles returns a copy of the document style table.
+func (d *Document) Styles() []Style {
+	out := make([]Style, len(d.styles))
+	copy(out, d.styles)
+	return out
+}
+
+// StyleCount returns the number of entries in the style table.
+func (d *Document) StyleCount() int { return len(d.styles) }
+
+// ChapterCount returns the number of chapters.
+func (d *Document) ChapterCount() int { return len(d.chapters) }
+
+// Chapter returns chapter i. The returned Chapter shares node storage with the
+// document and must be treated as read-only.
+func (d *Document) Chapter(i int) (Chapter, bool) {
+	if i < 0 || i >= len(d.chapters) {
+		return Chapter{}, false
+	}
+	return d.chapters[i], true
+}
+
+// Metadata returns document metadata.
+func (d *Document) Metadata() Metadata { return d.meta }
+
+func (d *Document) style(id StyleID) Style {
+	if int(id) < len(d.styles) {
+		return d.styles[id]
+	}
+	return Style{}
+}
+
+// DocumentBuilder validates and copies chapters into a Document.
+type DocumentBuilder struct {
+	styles   []Style
+	chapters []Chapter
+	meta     Metadata
+	ids      map[string]struct{}
+}
+
+// NewDocumentBuilder returns an empty builder.
+func NewDocumentBuilder() *DocumentBuilder {
+	return &DocumentBuilder{
+		styles: []Style{{}},
+		ids:    make(map[string]struct{}),
+	}
+}
+
+// SetStyles replaces the style table. Style ID 0 is always valid and denotes
+// the zero style; if styles is empty a single zero style is installed.
+func (b *DocumentBuilder) SetStyles(styles []Style) *DocumentBuilder {
+	b.styles = make([]Style, len(styles))
+	copy(b.styles, styles)
+	if len(b.styles) == 0 {
+		b.styles = []Style{{}}
+	}
+	return b
+}
+
+// SetMetadata sets document metadata.
+func (b *DocumentBuilder) SetMetadata(m Metadata) *DocumentBuilder {
+	b.meta = m
+	return b
+}
+
+// AddChapter validates ch and appends a copy. Chapters must have unique IDs.
+func (b *DocumentBuilder) AddChapter(ch Chapter) error {
+	if err := validateChapter(ch, len(b.styles)); err != nil {
+		return err
+	}
+	if _, exists := b.ids[ch.ID]; exists {
+		return fmt.Errorf("%w: duplicate chapter id %q", ErrInvalidDocument, ch.ID)
+	}
+	b.ids[ch.ID] = struct{}{}
+	cp := cloneChapter(ch)
+	b.chapters = append(b.chapters, cp)
+	return nil
+}
+
+// Build freezes the builder's contents into a Document.
+func (b *DocumentBuilder) Build() (*Document, error) {
+	styles := append([]Style(nil), b.styles...)
+	if len(styles) == 0 {
+		styles = []Style{{}}
+	}
+	chapters := make([]Chapter, len(b.chapters))
+	for i, ch := range b.chapters {
+		if err := validateChapter(ch, len(styles)); err != nil {
+			return nil, err
+		}
+		chapters[i] = cloneChapter(ch)
+	}
+	return &Document{styles: styles, chapters: chapters, meta: b.meta}, nil
+}
+
+func cloneChapter(ch Chapter) Chapter {
+	cp := Chapter{ID: ch.ID, Root: ch.Root, Nodes: make([]Node, len(ch.Nodes))}
+	for i, n := range ch.Nodes {
+		if n.Children != nil {
+			n.Children = append([]NodeID(nil), n.Children...)
+		}
+		cp.Nodes[i] = n
+	}
+	if len(ch.Anchors) != 0 {
+		cp.Anchors = make(map[AnchorID]NodeID, len(ch.Anchors))
+		for k, v := range ch.Anchors {
+			cp.Anchors[k] = v
+		}
+	}
+	return cp
+}
+
+const (
+	// maxBuilderDepth prevents malicious or accidentally cyclic IR from
+	// exhausting the stack while validating.
+	maxBuilderDepth = 4096
+)
+
+type visitState uint8
+
+const (
+	unvisited visitState = iota
+	visiting
+	visited
+)
+
+// validateChapter checks graph shape, style references and anchor targets.
+// It is O(nodes) and reports the first problem it finds.
+func validateChapter(ch Chapter, styleCount int) error {
+	if len(ch.Nodes) == 0 {
+		return fmt.Errorf("%w: chapter %q has no nodes", ErrInvalidDocument, ch.ID)
+	}
+	if ch.Root < 0 || int(ch.Root) >= len(ch.Nodes) {
+		return fmt.Errorf("%w: chapter %q root %d out of range", ErrInvalidDocument, ch.ID, ch.Root)
+	}
+	states := make([]visitState, len(ch.Nodes))
+	depth := make([]int32, len(ch.Nodes))
+
+	type frame struct {
+		node  NodeID
+		child int
+	}
+	stack := make([]frame, 0, 32)
+	stack = append(stack, frame{node: ch.Root})
+	states[ch.Root] = visiting
+
+	for len(stack) != 0 {
+		f := &stack[len(stack)-1]
+		n := &ch.Nodes[f.node]
+		if int(n.Style) >= styleCount {
+			return fmt.Errorf("%w: chapter %q node %d style %d out of range", ErrInvalidDocument, ch.ID, f.node, n.Style)
+		}
+		switch n.Kind {
+		case NodeBlock, NodeInline:
+			if n.Kind == NodeBlock && len(n.Children) == 0 && n.Text != "" {
+				return fmt.Errorf("%w: chapter %q node %d is a block with text; use a child text node", ErrInvalidDocument, ch.ID, f.node)
+			}
+			if f.child >= len(n.Children) {
+				states[f.node] = visited
+				stack = stack[:len(stack)-1]
+				continue
+			}
+			child := n.Children[f.child]
+			f.child++
+			if child < 0 || int(child) >= len(ch.Nodes) {
+				return fmt.Errorf("%w: chapter %q node %d child %d out of range", ErrInvalidDocument, ch.ID, f.node, child)
+			}
+			if n.Kind == NodeInline && ch.Nodes[child].Kind == NodeBlock {
+				return fmt.Errorf("%w: chapter %q node %d puts a block inside an inline", ErrInvalidDocument, ch.ID, child)
+			}
+			switch states[child] {
+			case visiting:
+				return fmt.Errorf("%w: chapter %q contains a cycle at node %d", ErrInvalidDocument, ch.ID, child)
+			case visited:
+				// Shared subtrees are allowed by the arena representation, but
+				// they have a single layout position. Rejecting them keeps the
+				// tree semantics unambiguous.
+				return fmt.Errorf("%w: chapter %q node %d is referenced more than once", ErrInvalidDocument, ch.ID, child)
+			}
+			if depth[f.node]+1 > maxBuilderDepth {
+				return fmt.Errorf("%w: chapter %q exceeds max depth", ErrInvalidDocument, ch.ID)
+			}
+			depth[child] = depth[f.node] + 1
+			states[child] = visiting
+			stack = append(stack, frame{node: child})
+		case NodeText, NodeImage, NodeBreak:
+			if len(n.Children) != 0 {
+				return fmt.Errorf("%w: chapter %q leaf node %d has children", ErrInvalidDocument, ch.ID, f.node)
+			}
+			states[f.node] = visited
+			stack = stack[:len(stack)-1]
+		default:
+			return fmt.Errorf("%w: chapter %q node %d has unknown kind %d", ErrInvalidDocument, ch.ID, f.node, n.Kind)
+		}
+	}
+
+	for i := range states {
+		if states[i] == unvisited {
+			// Unreachable nodes are almost always a compiler bug. Allow them
+			// only if they are structurally valid; they do not affect layout.
+			if int(ch.Nodes[i].Style) >= styleCount {
+				return fmt.Errorf("%w: chapter %q node %d style %d out of range", ErrInvalidDocument, ch.ID, i, ch.Nodes[i].Style)
+			}
+		}
+	}
+	root := ch.Nodes[ch.Root]
+	if root.Kind == NodeText || root.Kind == NodeImage || root.Kind == NodeBreak {
+		return fmt.Errorf("%w: chapter %q root must be a container", ErrInvalidDocument, ch.ID)
+	}
+	for id, node := range ch.Anchors {
+		if id == NoAnchor {
+			return fmt.Errorf("%w: chapter %q uses anchor 0", ErrInvalidDocument, ch.ID)
+		}
+		if node < 0 || int(node) >= len(ch.Nodes) {
+			return fmt.Errorf("%w: chapter %q anchor %d points at node %d", ErrInvalidDocument, ch.ID, id, node)
+		}
+	}
+	return nil
+}
+
+// Errors returned by the render package. Use errors.Is to test them.
+var (
+	ErrInvalidDocument = errors.New("render: invalid document")
+	ErrInvalidOptions  = errors.New("render: invalid options")
+	ErrNoFonts         = errors.New("render: no fonts")
+	ErrLimitExceeded   = errors.New("render: limit exceeded")
+	ErrClosed          = errors.New("render: layout closed")
+)

@@ -1,0 +1,11 @@
+# Go test binaries and profiles
+*.test
+*.out
+*.prof
+*.mem
+coverage.*
+
+# Editor / OS noise
+.DS_Store
+.idea/
+.vscode/
