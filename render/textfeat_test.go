@@ -241,6 +241,75 @@ func TestBorderPaginationEdges(t *testing.T) {
 	}
 }
 
+func TestNestedBackgroundsSurvivePageBreaks(t *testing.T) {
+	colChild := paint.Color{G: 0x90, A: 0xff}
+	styles := []Style{
+		{},
+		{
+			FontFamily: "Test Serif", FontSize: 16, LineHeight: 1.5,
+			Color:        paint.Color{A: 0xff},
+			BorderTop:    Border{Width: 2, Color: colTop},
+			BorderRight:  Border{Width: 3, Color: colRight},
+			BorderBottom: Border{Width: 4, Color: colBottom},
+			BorderLeft:   Border{Width: 5, Color: colLeft},
+			Background:   colBG,
+		},
+		{
+			FontFamily: "Test Serif", FontSize: 16, LineHeight: 1.5,
+			Color: paint.Color{A: 0xff}, Background: colChild,
+		},
+	}
+	// A tall parent box holding short child boxes: on every page after the
+	// first, some child ends above the page top while the parent still covers
+	// it, which is the case that used to drop the parent's background.
+	nodes := []Node{
+		{Kind: NodeBlock, Style: 1, Children: []NodeID{1}},
+	}
+	var kids []NodeID
+	for i := 0; i < 12; i++ {
+		text := NodeID(len(nodes))
+		nodes = append(nodes, Node{
+			Kind: NodeText,
+			Text: strings.Repeat("A child block with its own background. ", 12),
+		})
+		block := NodeID(len(nodes))
+		nodes = append(nodes, Node{Kind: NodeBlock, Style: 2, Children: []NodeID{text}})
+		kids = append(kids, block)
+	}
+	nodes[0].Children = kids
+	doc := featureDoc(t, styles, nodes)
+	opts := featureOptions(t, 420, 300)
+	l := featureLayout(t, doc, opts)
+	if l.PageCount() < 3 {
+		t.Fatalf("need a box spanning at least 3 pages, got %d", l.PageCount())
+	}
+	for n := 0; n < l.PageCount(); n++ {
+		p := &capturePainter{}
+		l.Page(n).Draw(p)
+		if countColor(p.fills, colBG) == 0 {
+			t.Fatalf("page %d is missing the parent background", n)
+		}
+		if countColor(p.fills, colLeft) == 0 || countColor(p.fills, colRight) == 0 {
+			t.Fatalf("page %d is missing a parent side border", n)
+		}
+		if countColor(p.fills, colChild) == 0 {
+			t.Fatalf("page %d is missing a child background", n)
+		}
+	}
+
+	// The same clip walk drives scroll tiles.
+	opts.Mode = ModeScroll
+	opts.TileHeight = 120
+	scroll := featureLayout(t, doc, opts)
+	for n := 0; n < scroll.TileCount(); n++ {
+		p := &capturePainter{}
+		scroll.Tile(n).Draw(p)
+		if countColor(p.fills, colBG) == 0 {
+			t.Fatalf("tile %d is missing the parent background", n)
+		}
+	}
+}
+
 func TestBackgroundCornerRadiusUsesRoundRect(t *testing.T) {
 	styles := []Style{
 		{},

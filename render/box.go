@@ -86,10 +86,13 @@ func appendBoxOps(ops []drawOp, boxes []blockRect, clip paint.Rect, offX, offY f
 	if len(boxes) == 0 || clip.Empty() {
 		return ops
 	}
-	start := sort.Search(len(boxes), func(i int) bool {
-		return offY+boxes[i].y+boxes[i].height > clip.Y
-	})
-	for i := start; i < len(boxes); i++ {
+	// Boxes nest, so their bottom edges are not monotonic even though their top
+	// edges are: a tall parent is followed by short children that end above the
+	// clip. Searching for the first box whose bottom edge reaches the clip
+	// would therefore skip the parent on any page where a child ends above it,
+	// losing the parent's background and side borders. Scan from the top and
+	// stop below the clip instead.
+	for i := 0; i < len(boxes); i++ {
 		b := &boxes[i]
 		if offY+b.y >= clip.Y+clip.Height {
 			break
