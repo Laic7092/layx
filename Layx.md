@@ -200,7 +200,9 @@ render/systemfont       可选：系统字体加载
   - 行首行尾标点压缩。
   - ruby（后置）。
   - 竖排（后置）。
-- 断行阶段使用 `ShapeNoExtents`；绘制可见页时再取 glyph extents。
+- 断行阶段必须使用带 extents 的 `Shape`：`LineWrapper` 在 glyph `Width == 0`
+  时会把它当成尾随空白并扣掉 advance，`ShapeNoExtents` 会让每行少算一个字宽，
+  两端对齐时行会溢出右边界。（实测 500 万字多分配约 9%，换来正确的断行。）
 - 每个 worker 独立 `HarfbuzzShaper` / `LineWrapper`，不可共享。
 
 ### 5.3 块/行内布局

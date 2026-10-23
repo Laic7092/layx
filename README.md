@@ -3,7 +3,7 @@
 纯 Go 的 reflowable 文档排版 / 渲染内核。输入是宿主已经解析、级联好的 `render.Document`，
 输出是分页结果、`DisplayList` 和命中/选区/锚点映射。**不解析 EPUB/XHTML/CSS，不内置光栅器。**
 
-当前进度：**M0（单章 spike）已落地**。
+当前进度：**M0 已落地，M1 排版质量进行中**。
 
 ```text
 宿主/编译器                         本库
@@ -123,6 +123,22 @@ LAYX_CJK_FONT_INDEX=2 \
 go test ./render -run '^$' -bench 'BenchmarkLayout5M' -benchtime 1x
 ```
 
+## 渲染快照 / 阶段对比
+
+`scripts/snapshot.sh` 用无头浏览器把引擎输出截成 PNG，并按阶段做前后对比。
+快照是构建产物，放在 `snapshots/`（已 gitignore），不会进仓库。
+
+```sh
+./scripts/snapshot.sh M0                 # 记录当前阶段
+./scripts/snapshot.sh M1 --pages 1,2     # 下一个阶段，自动和 M0 对比
+./scripts/snapshot.sh --compare M0 M1    # 只重生成对比图
+cat snapshots/index.md                   # 阶段元数据 + 图片 + 像素差异统计
+```
+
+依赖：`go`、`curl`，以及 Chrome/Chromium（或 WSL 下的 Windows Chrome/Edge；
+也可以用 `CHROME=/path/to/chrome` 指定）。对比图是左右并排 + 差异热力图，
+统计输出形如 `changed_pct=6.58 mean_abs_diff=6.988`。
+
 ## 测试
 
 ```sh
@@ -138,6 +154,11 @@ Noto 路径，找不到则跳过（可用 `LAYX_CJK_FONT` / `LAYX_CJK_FONT_INDEX
 ## 已知限制 / 下一步
 
 - 尚未实现：表格、ruby、竖排、flex/grid、RTL 视觉序、浮动环绕、脚注、链接命中透传。
+- 标点压缩 / 行末标点悬挂（`text-spacing-trim`）尚未实现；目前依赖字体自带的
+  全角标点宽度，行末标点会占满一个字宽。
+- 两端对齐会把余量分给空格和 CJK 字间隙；标点相邻的间隙按半权重参与。
+- `keep-with-next`（标题不与正文分离）尚未实现，只有 `KeepTogether` 与
+  `break-before/after`。
 - 行高 / 段间距变化目前仍走完整重排；`BreakKey` / `PageKey` 缓存是 M3。
 - 分页暂按行边界；复杂 `break-inside` 与跨页图片策略仍需细化。
 - 背景色、主题色由宿主通过 `Typography.Background` / `Style.Color` 提供，绘制后端自行决定。
