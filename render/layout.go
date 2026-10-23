@@ -1091,24 +1091,25 @@ func paginate(ctx context.Context, items []flowItem, pageHeight float32, typo Ty
 				breakAt = start
 			}
 		}
-		// Widows and orphans only apply when the break is inside a paragraph.
+		// Widows and orphans only apply when the break is inside a paragraph,
+		// and only when the policy asks for protection: zero means off.
 		if breakAt == i && it.para != nil && it.paraLine > 0 {
 			orphans := it.orphans
 			if orphans <= 0 {
-				orphans = typo.Orphans
+				orphans = typo.Rules.Orphans
 			}
 			widows := it.widows
 			if widows <= 0 {
-				widows = typo.Widows
+				widows = typo.Rules.Widows
 			}
 			pl := int(it.paraLine)
 			total := int(it.paraLines)
-			if pl < orphans {
+			if orphans > 0 && pl < orphans {
 				start := i - pl
 				if start > first {
 					breakAt = start
 				}
-			} else if remain := total - pl; remain < widows {
+			} else if remain := total - pl; widows > 0 && remain < widows {
 				cand := i + (widows - remain)
 				if cand > i && cand <= len(items) &&
 					items[cand-1].y+items[cand-1].height <= limit+eps {

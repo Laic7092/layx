@@ -196,8 +196,8 @@ func benchLayoutOptions(w, h, size, lineHeight float64, justify bool, fonts *ren
 			FontFamily: "book", FontSize: float32(size), LineHeight: float32(lineHeight),
 			Color: paint.Color{A: 0xff},
 			// Chrome's multicol fragmentation does not apply widows/orphans;
-			// disable them here so both sides do the same amount of work.
-			Widows: 1, Orphans: 1,
+			// keep them off (the zero value) so both sides do the same work.
+			Rules: render.TextRules{Widows: 1, Orphans: 1},
 		},
 		Fonts:   fonts,
 		Margins: paint.Insets{Top: benchMargin, Right: benchMargin, Bottom: benchMargin, Left: benchMargin},

@@ -80,9 +80,10 @@ type Typography struct {
 	// Background is painted behind each page. A transparent value means the
 	// host is responsible for the page background.
 	Background paint.Color
-	// Widows and Orphans are page-break defaults. Zero uses 2 and 2.
-	Widows  int
-	Orphans int
+	// Rules carries the document-wide line-breaking and pagination policies.
+	// Its zero value is the spec default: no optional typography, and no
+	// widow/orphan protection. See TextRules.
+	Rules TextRules
 }
 
 func (t Typography) withDefaults() Typography {
@@ -101,12 +102,9 @@ func (t Typography) withDefaults() Typography {
 	if t.Color.Transparent() {
 		t.Color = paint.Color{R: 0, G: 0, B: 0, A: 0xff}
 	}
-	if t.Widows <= 0 {
-		t.Widows = 2
-	}
-	if t.Orphans <= 0 {
-		t.Orphans = 2
-	}
+	// Rules is intentionally left alone: its zero value is already the spec
+	// default. In particular a zero Widows/Orphans disables the protection
+	// instead of being lifted to the old 2/2.
 	return t
 }
 

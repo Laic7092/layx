@@ -89,7 +89,7 @@ func TestLineBoxes(t *testing.T) {
 		Viewport: Viewport{Width: width, Height: height},
 		Typography: Typography{
 			FontFamily: "book", FontSize: size, LineHeight: lineHeight,
-			Color: paint.Color{A: 0xff}, Widows: 1, Orphans: 1,
+			Color: paint.Color{A: 0xff}, Rules: TextRules{Widows: 1, Orphans: 1},
 		},
 		Fonts:   fonts,
 		Margins: paint.Insets{Top: 40, Right: 40, Bottom: 40, Left: 40},

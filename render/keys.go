@@ -83,13 +83,29 @@ func (k *keyer) color(c paint.Color) {
 	k.u32(uint32(c.A))
 }
 
+// textRules hashes a whole TextRules value. Callers never enumerate its fields,
+// so a policy added to the struct automatically participates in every key that
+// hashes it.
+func (k *keyer) textRules(r TextRules) {
+	k.flag(r.Autospacing)
+	k.flag(r.PunctuationCompression)
+	k.flag(r.HangingPunctuation)
+	k.i(r.Widows)
+	k.i(r.Orphans)
+}
+
 func (k *keyer) done() keyHash { return keyHash{a: k.a, b: k.b} }
 
 // chapterBreakKey hashes everything that can change horizontal line breaking
 // for one chapter:
 //
 //	text, resolved font faces/sizes, letter spacing, width, language,
-//	alignment and first-line indent
+//	alignment, first-line indent and TextRules
+//
+// TextRules is hashed whole, including the page-only widow/orphan counts, so
+// that adding a policy cannot silently miss this key. The cost is that changing
+// only Widows re-breaks lines; that is rare, and a stale line box would be a
+// silent wrong layout.
 //
 // Vertical properties (line height, paragraph gap, page height) and paint
 // properties (colors) are deliberately absent, so changing them keeps this
@@ -106,6 +122,7 @@ func chapterBreakKey(k *keyer, doc *Document, ch *Chapter, opts LayoutOptions, t
 	k.f32(opts.Margins.Right)
 	k.flag(opts.Hyphenator != nil)
 	k.str(hyphenatorName(opts.Hyphenator))
+	k.textRules(typo.Rules)
 
 	var walk func(id NodeID, parent Style, parentLang string)
 	walk = func(id NodeID, parent Style, parentLang string) {
@@ -152,15 +169,14 @@ func chapterBreakKey(k *keyer, doc *Document, ch *Chapter, opts LayoutOptions, t
 }
 
 // pageKey adds the vertical inputs that turn line boxes into pages: line
-// height, paragraph gap, page content height and the widow/orphan defaults.
+// height, paragraph gap and page content height. Widows/Orphans are already
+// part of breakKey because TextRules is hashed whole there.
 func pageKey(k *keyer, breakKey keyHash, typo Typography, contentH float32) keyHash {
 	k.reset()
 	k.hash(breakKey)
 	k.f32(typo.LineHeight)
 	k.f32(typo.ParagraphGap)
 	k.f32(contentH)
-	k.i(typo.Widows)
-	k.i(typo.Orphans)
 	return k.done()
 }
 

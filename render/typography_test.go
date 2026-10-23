@@ -60,6 +60,11 @@ func firstLineGlyphs(p *posPainter) []placedGlyph {
 
 func cjkParagraph(t *testing.T, text string, align TextAlign, width, size float32) *Layout {
 	t.Helper()
+	return cjkParagraphRules(t, text, align, width, size, TextRules{})
+}
+
+func cjkParagraphRules(t *testing.T, text string, align TextAlign, width, size float32, rules TextRules) *Layout {
+	t.Helper()
 	cjk, ok := cjkFace(t)
 	if !ok {
 		t.Skip("no CJK font available")
@@ -86,7 +91,7 @@ func cjkParagraph(t *testing.T, text string, align TextAlign, width, size float3
 	}
 	l, err := mustEngine(t, 1).Layout(context.Background(), doc, LayoutOptions{
 		Viewport:   Viewport{Width: width, Height: 2000},
-		Typography: Typography{FontFamily: "CJK", FontSize: size, LineHeight: 1.5, Color: paint.Color{A: 0xff}},
+		Typography: Typography{FontFamily: "CJK", FontSize: size, LineHeight: 1.5, Color: paint.Color{A: 0xff}, Rules: rules},
 		Fonts:      fs,
 	})
 	if err != nil {
@@ -152,8 +157,9 @@ func TestJustifyWeights(t *testing.T) {
 }
 
 func TestAutospaceGap(t *testing.T) {
-	// "中文abc": cluster 1 is 文, cluster 2 is a.
-	l := cjkParagraph(t, "中文abc", AlignLeft, 600, 20)
+	// "中文abc": cluster 1 is 文, cluster 2 is a. Autospacing is a policy, off
+	// by default, so the test asks for it explicitly.
+	l := cjkParagraphRules(t, "中文abc", AlignLeft, 600, 20, TextRules{Autospacing: true})
 	p := &posPainter{}
 	l.Page(0).Draw(p)
 	glyphs := firstLineGlyphs(p)
@@ -203,5 +209,33 @@ func TestJustifyStretchesCJKGaps(t *testing.T) {
 	edge := gJust[len(gJust)-1].x + gJust[len(gJust)-1].advance
 	if !near(edge, width, 1) {
 		t.Fatalf("justified line ends at %.2f, want %.2f", edge, float32(width))
+	}
+}
+
+// TestAutospacingOffByDefault pins the corrected zero value: without
+// TextRules.Autospacing the engine must not insert a CJK/Latin gap.
+func TestAutospacingOffByDefault(t *testing.T) {
+	l := cjkParagraph(t, "中文abc", AlignLeft, 600, 20)
+	p := &posPainter{}
+	l.Page(0).Draw(p)
+	glyphs := firstLineGlyphs(p)
+	if len(glyphs) < 3 {
+		t.Fatalf("expected at least 3 glyphs, got %d", len(glyphs))
+	}
+	em := glyphs[0].advance
+	if !near(glyphs[1].advance, em, 0.05) {
+		t.Fatalf("文 advance = %.3f, want %.3f with autospacing off", glyphs[1].advance, em)
+	}
+}
+
+// TestTypographyKeepsZeroRules proves withDefaults does not lift the policy
+// zeros: 0 widows/orphans means "off", not "2".
+func TestTypographyKeepsZeroRules(t *testing.T) {
+	got := Typography{}.withDefaults()
+	if got.Rules.Widows != 0 || got.Rules.Orphans != 0 {
+		t.Fatalf("withDefaults lifted zero rules to %+v", got.Rules)
+	}
+	if got.Rules.Autospacing || got.Rules.PunctuationCompression || got.Rules.HangingPunctuation {
+		t.Fatalf("withDefaults enabled an opt-in policy: %+v", got.Rules)
 	}
 }

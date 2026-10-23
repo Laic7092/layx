@@ -606,3 +606,44 @@ func TestPageGlyphBaselines(t *testing.T) {
 		t.Fatalf("expected multiple baselines across pages, got %d", maxBaselines)
 	}
 }
+
+// TestPaginateZeroWidowsOrphans pins the corrected zero semantics: a zero
+// Widows/Orphans in TextRules means "no protection", and a non-zero value
+// still moves a paragraph that would leave too few lines at the top of a page.
+func TestPaginateZeroWidowsOrphans(t *testing.T) {
+	const pageHeight = 115
+	items := make([]flowItem, 0, 16)
+	for i := 0; i < 10; i++ {
+		items = append(items, flowItem{
+			kind: itemImage, x: 0, y: float32(i * 10), width: 10, height: 10,
+		})
+	}
+	p := &paragraph{text: []rune("0123456789abcdefghij")}
+	for li := 0; li < 6; li++ {
+		items = append(items, flowItem{
+			kind: itemLine, para: p, start: int32(li), end: int32(li + 1),
+			width: 10, avail: 10, height: 10, y: float32(100 + li*10),
+			paraLine: int32(li), paraLines: 6,
+		})
+	}
+
+	typo := Typography{Rules: TextRules{Widows: 0, Orphans: 0}}
+	pages := paginate(context.Background(), items, pageHeight, typo)
+	if len(pages) < 2 {
+		t.Fatalf("expected at least two pages, got %d", len(pages))
+	}
+	// Without protection the page ends after the first line of the paragraph.
+	if pages[0].last != 11 {
+		t.Fatalf("zero orphans: first page last item = %d, want 11", pages[0].last)
+	}
+
+	typo.Rules.Orphans = 2
+	pages = paginate(context.Background(), items, pageHeight, typo)
+	if len(pages) < 2 {
+		t.Fatalf("expected at least two pages, got %d", len(pages))
+	}
+	// With two orphan lines required, the paragraph starts on the next page.
+	if pages[0].last != 10 {
+		t.Fatalf("orphans=2: first page last item = %d, want 10", pages[0].last)
+	}
+}

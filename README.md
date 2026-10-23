@@ -78,6 +78,32 @@ err := b.AddChapter(render.Chapter{
 doc, err := b.Build()
 ```
 
+### 中文小说的推荐开关组
+
+引擎不自作主张：标点挤压、行末悬挂、孤行/寡行保护、中西文间距都是**政策**，零值
+一律是规范初始值（即全部关闭）。做中文正文时建议在 `Typography.Rules` 里显式打开：
+
+```go
+Typography: render.Typography{
+    FontFamily: "serif",
+    FontSize:   18,
+    LineHeight: 1.6,
+    Color:      paint.Color{A: 0xff},
+    Rules: render.TextRules{
+        PunctuationCompression: true,  // 成对全角标点各收半宽，与 Chrome 默认一致
+        HangingPunctuation:     false, // 行末标点探出；浏览器默认不悬挂，默认关
+        Autospacing:            false, // 中西文 1/8 em；Chrome 不加，混排想对齐浏览器就关
+        Widows:                 2,     // 0 = 不保护
+        Orphans:                2,     // 0 = 不保护
+    },
+},
+// 首行缩进属于文档样式，不在 Typography 上：
+Style{FontSize: 18, FirstLineIndent: 36, TextAlign: render.AlignJustify},
+```
+
+`Rules` 整体参与 `BreakKey`，改任何一个开关都会让断行结果失效重算，不会出现
+"缓存命中但排版是旧的"。
+
 位置语义：
 
 - `Location{Chapter, Node, Anchor, Offset}`：`Node`/`Offset` 用于当前 layout 内的命中、选区、
@@ -221,10 +247,14 @@ id/cluster/内容坐标逐字比对两条路径。**tile 是 DisplayList，不�
 `Layout.Relayout` 按三层 key 复用阶段产物：
 
 ```text
-BreakKey = hash(text, fonts, fontSize, letterSpacing, width, lang, align, indent)
-PageKey  = hash(BreakKey, lineHeight, paragraphGap, pageHeight, margins, widows/orphans)
+BreakKey = hash(text, fonts, fontSize, letterSpacing, width, lang, align, indent, rules)
+PageKey  = hash(BreakKey, lineHeight, paragraphGap, pageHeight, margins)
 PaintKey = hash(PageKey, theme)
 ```
+
+`rules` 是 `Typography.Rules`（`TextRules`）的**整体哈希**：新增一个政策字段
+会自动进 key。`Widows`/`Orphans` 也只影响分页，但出于同样的安全考虑一起进了
+`BreakKey`，代价是改孤行设置时多做一次断行。
 
 - `BreakKey` 命中：不 shaping、不断行，直接复用 `breakUnit`。
 - `PageKey` 命中：复用行盒与页映射，只重算 y 和页边界。
@@ -251,6 +281,11 @@ Noto 路径，找不到则跳过（可用 `LAYX_CJK_FONT` / `LAYX_CJK_FONT_INDEX
   全角标点宽度。这一项的影响已经量化（见上一节）：对话密集的中文文本里，Chrome
   靠挤压成对标点每行多放 1–2 个字；把挤压关掉后两边逐行一致。
 - 两端对齐会把余量分给空格和 CJK 字间隙；标点相邻的间隙按半权重参与。
+- **两个默认值是故意偏离旧行为的**（`docs/text-rules.md` 的决策）：
+  `Typography.Rules.Widows` / `Orphans` 的零值现在是"关闭"，不再提升为 2/2；
+  `Autospacing`（中西文 1/8 em）默认 off。需要旧行为就显式赋值：孤行/寡行写
+  `Widows: 2, Orphans: 2`，中西文间距写 `Autospacing: true`。golden 里凡是含
+  中西混排或依赖 2/2 分页的布局都会随这两条变化，测试已改为显式传值。
 - `keep-with-next`（标题不与正文分离）尚未实现，只有 `KeepTogether` 与
   `break-before/after`。
 - 行高 / 段间距变化走 `Layout.Relayout` 的变体缓存（500 万字约 22ms）；但

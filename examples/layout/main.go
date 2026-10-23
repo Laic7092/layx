@@ -63,7 +63,13 @@ func main() {
 	b := render.NewDocumentBuilder().
 		SetStyles([]render.Style{
 			{},
-			{FontFamily: "book", FontSize: float32(*fontSize), LineHeight: 1.6, Color: paint.Color{A: 0xff}, MarginBottom: 8},
+			{
+				FontFamily: "book", FontSize: float32(*fontSize), LineHeight: 1.6,
+				Color: paint.Color{A: 0xff}, MarginBottom: 8,
+				// First-line indent is a document-style decision, so the
+				// engine has no default for it: the example sets 2em here.
+				FirstLineIndent: float32(*fontSize) * 2,
+			},
 		})
 	if err := b.AddChapter(render.Chapter{ID: "text", Root: 0, Nodes: nodes}); err != nil {
 		log.Fatal(err)

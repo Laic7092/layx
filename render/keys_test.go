@@ -406,3 +406,114 @@ func TestRelayoutRespectsCancellation(t *testing.T) {
 		t.Fatal("Relayout with a canceled context succeeded for a new variant")
 	}
 }
+
+// breakKeyFor computes one chapter's BreakKey without laying anything out.
+// A fresh keyer is used per call, so callers must compare keys produced by the
+// same keyer (the seeds live there).
+func breakKeyFor(k *keyer, doc *Document, opts LayoutOptions, rules TextRules) keyHash {
+	typo := opts.Typography
+	typo.Rules = rules
+	return chapterBreakKey(k, doc, &doc.chapters[0], opts, typo)
+}
+
+// TestBreakKeyHashesEveryTextRule walks every field of TextRules by hand (the
+// render package forbids reflect, and a hand-written table forces a new field
+// to add a case here) and asserts that changing it changes the chapter's
+// BreakKey. This is the structural guard behind "a policy cannot be missing
+// from the key".
+func TestBreakKeyHashesEveryTextRule(t *testing.T) {
+	doc := keyTestDoc(t, 1, false)
+	opts := keyTestOptions(t)
+	k := newKeyer()
+	base := breakKeyFor(k, doc, opts, TextRules{})
+
+	cases := []struct {
+		name  string
+		apply func(*TextRules)
+	}{
+		{"Autospacing", func(r *TextRules) { r.Autospacing = true }},
+		{"PunctuationCompression", func(r *TextRules) { r.PunctuationCompression = true }},
+		{"HangingPunctuation", func(r *TextRules) { r.HangingPunctuation = true }},
+		{"Widows", func(r *TextRules) { r.Widows = 3 }},
+		{"Orphans", func(r *TextRules) { r.Orphans = 3 }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var rules TextRules
+			tc.apply(&rules)
+			if got := breakKeyFor(k, doc, opts, rules); got == base {
+				t.Fatalf("BreakKey did not change when TextRules.%s changed", tc.name)
+			}
+		})
+	}
+
+	if again := breakKeyFor(k, doc, opts, TextRules{}); again != base {
+		t.Fatal("BreakKey is not stable for identical TextRules")
+	}
+}
+
+// TestPaintOptionsDoNotChangeLayoutKeys is the reverse guard: options that only
+// change how a page is painted must leave BreakKey and PageKey alone, otherwise
+// switching theme or decoration would re-break and re-paginate the book.
+//
+// EmulateBold is not a layout option at all: buildLine derives it from the
+// resolved face and the requested weight, and neither is read while painting.
+func TestPaintOptionsDoNotChangeLayoutKeys(t *testing.T) {
+	build := func(paintOnly bool) *Document {
+		paintStyle := Style{
+			FontFamily: "Test Serif", FontSize: 16, LineHeight: 1.5,
+			MarginBottom: 8,
+		}
+		if paintOnly {
+			paintStyle.Color = paint.Color{R: 0x20, G: 0x30, B: 0x40, A: 0xff}
+			paintStyle.TextDecoration = TextDecorationUnderline
+			paintStyle.TextDecorationColor = paint.Color{R: 0x10, A: 0xff}
+			paintStyle.Background = paint.Color{R: 0xee, G: 0xee, B: 0xee, A: 0xff}
+			paintStyle.CornerRadius = 6
+			paintStyle.BorderTop = Border{Color: paint.Color{R: 0xff, A: 0xff}}
+			paintStyle.BorderRight = Border{Color: paint.Color{R: 0x0f, A: 0xff}}
+			paintStyle.BorderBottom = Border{Color: paint.Color{R: 0xf0, A: 0xff}}
+			paintStyle.BorderLeft = Border{Color: paint.Color{R: 0xff, G: 0xff, A: 0xff}}
+		}
+		styles := []Style{{}, paintStyle}
+		b := NewDocumentBuilder().SetStyles(styles).SetMetadata(Metadata{Language: "en", Reflowable: true})
+		nodes := []Node{
+			{Kind: NodeBlock, Style: 1, Children: []NodeID{1}},
+			{Kind: NodeText, Text: strings.Repeat("The quick brown fox jumps over the lazy dog. ", 30)},
+		}
+		if err := b.AddChapter(Chapter{ID: "c", Root: 0, Nodes: nodes}); err != nil {
+			t.Fatalf("AddChapter: %v", err)
+		}
+		doc, err := b.Build()
+		if err != nil {
+			t.Fatalf("Build: %v", err)
+		}
+		return doc
+	}
+
+	opts := keyTestOptions(t)
+	plainDoc, paintedDoc := build(false), build(true)
+	k := newKeyer()
+	plain := breakKeyFor(k, plainDoc, opts, TextRules{})
+	painted := breakKeyFor(k, paintedDoc, opts, TextRules{})
+	if plain != painted {
+		t.Fatal("paint-only Style fields changed BreakKey")
+	}
+	plainPage := pageKey(k, plain, opts.Typography, contentHeight(opts))
+	paintedPage := pageKey(k, painted, opts.Typography, contentHeight(opts))
+	if plainPage != paintedPage {
+		t.Fatal("paint-only Style fields changed PageKey")
+	}
+
+	// Typography.Color and Background are paint-only too: they live in
+	// PaintKey, below PageKey.
+	tinted := opts.Typography
+	tinted.Color = paint.Color{R: 1, G: 2, B: 3, A: 0xff}
+	tinted.Background = paint.Color{R: 9, G: 9, B: 9, A: 0xff}
+	if got := breakKeyFor(k, plainDoc, opts, TextRules{}); got != plain {
+		t.Fatal("Typography paint fields changed BreakKey")
+	}
+	if got := pageKey(k, plain, tinted, contentHeight(opts)); got != plainPage {
+		t.Fatal("Typography paint fields changed PageKey")
+	}
+}

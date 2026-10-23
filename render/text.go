@@ -203,7 +203,9 @@ func (w *textWorker) shapeRange(p *paragraph, start, end int, defaultLang langua
 		}
 	}
 	w.addWordSpacing(p, out)
-	w.addAutospacing(p, out)
+	if w.typo.Rules.Autospacing {
+		w.addAutospacing(p, out)
+	}
 	return out
 }
 
@@ -268,7 +270,8 @@ func (w *textWorker) addWordSpacing(p *paragraph, runs []shapedRun) {
 // addAutospacing inserts a 1/8 em gap where an ideographic character meets a
 // Latin letter or digit, mirroring CSS text-autospace. The gap is added to the
 // preceding glyph's advance so line wrapping sees the final width. Applied
-// before wrapping, so it also affects where lines break.
+// before wrapping, so it also affects where lines break. It only runs when
+// TextRules.Autospacing is set; the gap is not a CSS initial value.
 func (w *textWorker) addAutospacing(p *paragraph, runs []shapedRun) {
 	if len(runs) == 0 {
 		return

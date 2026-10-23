@@ -56,9 +56,10 @@
   完全一致**。所以"引擎不自作主张、默认不挤压"这条政策是有数据支撑的取舍，
   实现时按 `text-spacing-trim: normal` 的规则（成对标点各收半宽），并用同一份
   语料做验收。
-- 当前的 `addAutospacing`（1/8 em）是**无条件执行**的，与"零值 = 规范默认"
-  冲突，属于待修正项（见"实施待办"）。
-- 引擎目前对 `Widows` / `Orphans` 的默认是 2/2，同样是偏离，待改为"0 即关闭"。
+- `Autospacing`（1/8 em）曾经是无条件执行的，与"零值 = 规范默认"冲突；现在由
+  `TextRules.Autospacing` 驱动，默认 off。
+- `Widows` / `Orphans` 的零值就是"关闭"：`Typography.withDefaults()` 不再把 0
+  提升为 2/2，浏览器本来也不实现这两条保护。
 - `FirstLineIndent` 只存在于每个节点的 `Style` 上，`Typography` 不提供默认值：
   首行缩进属于文档样式，引擎不注入。
 
@@ -79,11 +80,13 @@
 
 防护手段（不是约定，是结构）：
 
-1. 把所有影响断行的开关收进一个结构体（如 `TextRules`），`BreakKey` 哈希**该
-   结构体的规范化编码**。新增字段自动进 key，不依赖有人记得改哈希函数。
-2. 穷举测试：逐个字段取两个值，断言 `BreakKey` 变化。
-3. 反向测试：只影响绘制的选项取值变化时，`PageKey` 必须不变（否则换主题会
-   触发重排）。
+1. 所有断行/分页政策收进 `render/textrules.go` 的 `TextRules`，`BreakKey` 哈希
+   **整个结构体**。新增字段自动进 key，不依赖有人记得改哈希函数。只影响分页的
+   字段（`Widows`/`Orphans`）也一并进 `BreakKey`：这会让改孤行设置时多做一次
+   断行，但不会出现"缓存命中却分页错误"的静默 bug。安全优先于缓存粒度。
+2. 穷举测试：`render/keys_test.go` 逐字段改值，断言 `BreakKey` 变化。
+3. 反向测试：只影响绘制的选项（颜色、装饰、背景、圆角、边框色）取值变化时，
+   `PageKey` 必须不变（否则换主题会触发重排）。
 
 ## 预设不属于核心
 
@@ -126,16 +129,12 @@
 | `Widows` / `Orphans` 零值 | **关闭（0 即不启用保护）** | 对齐浏览器实际行为；需要保护的宿主显式给值 |
 | 中文首行缩进 2em | **完全交给样式，核心不提供默认值** | 首行缩进是文档排版决策，不该由引擎注入；`Typography` 不新增该字段 |
 
-## 实施待办
+## 实施状态
 
-排在 M2 合并之后（避免与 `render/options.go` 的改动冲突）：
+五条待办已完成：`Widows`/`Orphans` 零值即关闭、`Autospacing` 改由开关驱动并
+默认 off、依赖旧默认值的测试改为显式传值、`TextRules` 收口并整体哈希进
+`BreakKey`（含穷举/反向测试）、`examples/` 显式设置 `FirstLineIndent` 且 README
+给出中文小说推荐开关组。
 
-1. `Typography.withDefaults()`：`Widows` / `Orphans` 不再把 0 提升为 2，改由
-   `paginate()` 把 0 解释为"不启用孤行/寡行保护"。
-2. 删掉 `addAutospacing` 的无条件调用，改为由开关驱动，默认 off。
-3. 核对依赖 2/2 默认值的测试（`render/layout_test.go`、`render/cjk_test.go` 里
-   断言跨页行为的部分），改为显式传值。
-4. 把影响断行的开关收进 `TextRules`，`BreakKey` 整体哈希它；补穷举测试与
-   "绘制选项不得改变 `PageKey`"的反向测试。
-5. `examples/` 里显式设置 `FirstLineIndent`（演示"由样式决定"），并在 README
-   给出中文小说推荐开关组。
+`PunctuationCompression` 与 `HangingPunctuation` 也已按本文的开关约定实现，
+默认 off；挤压的验收见 README 的 linecmp 一节。
