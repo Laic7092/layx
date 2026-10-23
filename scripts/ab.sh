@@ -10,13 +10,19 @@
 # stdout. Metrics covered: first-page time, whole-book layout, cold/hot page
 # turn p50/p99, font-size reflow, line-height repagination, memory.
 #
+# The webview side's setup is split into HTML parse and style+layout, and the
+# native side's font-size and line-height changes go through Relayout, so those
+# two rows measure the variant cache rather than a second cold layout. See
+# examples/wasm/web/ab.js and examples/wasm/bench.go.
+#
 # --workers 1,4,8 runs each pool size as its own group (separate Chromium
 # runs) and merges every group into the same JSON. The pool compiles wasm once,
 # then N workers each copy and parse the font; init and layout are timed
 # separately. Without --workers the original single-instance path is unchanged.
 #
 # Not covered yet: app cold start (process/WebView spawn), process-tree RSS,
-# scroll jank, multi-threaded native (wasm has GOMAXPROCS=1).
+# scroll jank, multi-threaded native (wasm has GOMAXPROCS=1; use
+# tools/bench_native for the native baseline on the same corpus).
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"

@@ -92,10 +92,24 @@
       html += '<p style="margin-bottom:' + SIZE * 0.5 + 'px">' + escapeHTML(p) + '</p>';
     }
 
-    const t0 = performance.now();
+    // Split the webview setup into the two stages the native side has no
+    // counterpart for, so the A/B can compare like with like:
+    //
+    //   parseMs         HTML tokenizer + tree builder only
+    //   styleLayoutMs   style resolution + layout + column fragmentation
+    //
+    // Assigning innerHTML does not force layout, and the pending style
+    // mutations are settled by the first geometry read. Nothing between the
+    // two timestamps may read a layout property, or the split collapses back
+    // into one number.
+    const tParse = performance.now();
     book.innerHTML = html;
-    void book.scrollWidth; // force layout
-    const setupMs = performance.now() - t0;
+    const parseMs = performance.now() - tParse;
+
+    const tLayout = performance.now();
+    void book.scrollWidth; // force style + layout + column fragmentation
+    const styleLayoutMs = performance.now() - tLayout;
+    const setupMs = parseMs + styleLayoutMs;
 
     const pages = Math.max(1, Math.round(book.scrollWidth / CW));
 
@@ -137,6 +151,8 @@
 
     return {
       setupMs: round(setupMs),
+      parseMs: round(parseMs),
+      styleLayoutMs: round(styleLayoutMs),
       pages,
       cold: cold.map(round),
       hot: hot.map(round),

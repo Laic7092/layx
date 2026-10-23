@@ -60,6 +60,10 @@ def merge(runs, label, workers):
         "runs": len(runs),
         "webview": {
             "setupMs": mm("webview", "setupMs"),
+            # Stage split: HTML parse vs style resolution + layout. Absent in
+            # runs recorded before the split existed.
+            "parseMs": mm("webview", "parseMs"),
+            "styleLayoutMs": mm("webview", "styleLayoutMs"),
             "fontLoadMs": mm("webview", "fontLoadMs"),
             "firstPageMs": mm("webview", "setupMs") + mm("webview", "fontLoadMs"),
             "pages": mm("webview", "pages"),
@@ -187,12 +191,22 @@ def print_table(merged, out_path):
             return "-"
         return fmt.format(pool[key])
 
+    def num(v):
+        # Old result files predate the stage split; print "-" instead of
+        # crashing on a missing field.
+        return "-" if v is None else round(v, 2)
+
     rows = [
         ("first page to ready (ms)",
          round(nv["bootMs"] + nv["buildMs"] + nv["layoutMs"] + nv["coldP50"], 2),
          round(wv["firstPageMs"], 2),
          "-"),
         ("whole-book layout (ms)", round(nv["buildMs"] + nv["layoutMs"], 2), round(wv["setupMs"], 2), "-"),
+        ("  webview: parse only (ms)", "-", num(wv.get("parseMs")), "-"),
+        ("  webview: style+layout (ms)",
+         round(nv["buildMs"] + nv["layoutMs"], 2),
+         num(wv.get("styleLayoutMs")),
+         "-"),
         ("pages", nv["pages"], wv["pages"], poolv("pages", "{:.0f}")),
         ("cold turn p50 / p99 (ms)",
          f'{nv["coldP50"]:.2f} / {nv["coldP99"]:.2f}',

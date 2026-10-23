@@ -25,6 +25,7 @@ github.com/laix/layx/render        核心：IR、字体、布局、分页、命�
 github.com/laix/layx/render/paint  绘制接口与基础类型（无光栅器）
 github.com/laix/layx/render/hyphen/en  可选：TeX 英文断字模式，核心不 import 它
 examples/layout                    最小示例：排版并打印页数
+tools/                             开发工具：快照图合成、原生性能基线（不属于库）
 ```
 
 直接依赖只有 `go-text/typesetting`（shaping / UAX #14 断行）和
@@ -201,8 +202,53 @@ PaintKey = hash(PageKey, theme)
 
 ## 性能
 
-本机（Ryzen 7 7800X3D，8 核 16 线程），文泉驿微米黑，18px，600×900 视口，
-5,000,000 字，只做布局（不含绘制）：
+三组数字回答三个不同的问题，混着念会得出错误结论。
+
+### 1. 与浏览器同语料对照
+
+语料 20 万字（中文正文，夹少量中英混排），640×900 视口，18px/1.65，两端对齐，
+40px 页边距，字体 Droid Sans Fallback。浏览器侧是 Linux Chromium 的 DOM + CSS
+multi-column（`scripts/ab.sh`），原生侧是同一份语料、同一组选项跑
+`tools/bench_native`。本机 Ryzen 7 7800X3D，3 次取中位数。
+
+| 配置 | 整书布局 | 字号 18→24 | 行高 ×1.2 | 页数 |
+|---|---:|---:|---:|---:|
+| 原生 Go，1 worker | 59.1 ms | 56.5 ms | 1.1 ms | 304 |
+| 原生 Go，2 | 31.0 | 29.2 | 1.0 | 304 |
+| 原生 Go，4 | 18.3 | 16.4 | 1.1 | 304 |
+| 原生 Go，8 | 14.1 | 12.3 | 1.1 | 304 |
+| 原生 Go，16 | 13.7 | 11.4 | 1.1 | 304 |
+| layx wasm（`GOMAXPROCS=1`） | 269.6 | 242.6 | 3.3 | 302 |
+| Chrome，DOM + multi-column | 58.5 | 51.2 | 24.3 | 315 |
+
+怎么读：
+
+- **单核与 Blink 同级**：59.1 vs 58.5 ms。
+- **多核快 4.2×**：8 / 16 worker 是 14.1 / 13.7 ms（59.1 / 14.1）。
+- **行高重排快一个数量级以上**：1.1 vs 24.3 ms（22×）。`LineHeight` 不在 `BreakKey`
+  里，所以只重新堆叠和分页，一次 shaping 都不做。
+- **字号重排没有缓存可用**：字号在 `BreakKey` 里，必须重断行；单核 56.5 ms 与 Chrome
+  51.2 ms 同级，多核（12.3 ms）快 4.2×。
+- **wasm 比原生单线程慢 4.6×**（269.6 vs 59.1）：这是运行时（单线程 + GC + 编译
+  目标），不是算法。所以“**在浏览器里跑 layx**”目前比浏览器自己的排版慢 4.6×；
+  “**作为原生库嵌进阅读器**”才与浏览器同级、多核 4×。这两个场景不能共用一句结论。
+- 页数 304 vs 315（+3.6%）来自标点挤压：Chrome 默认 `text-spacing-trim` 压缩成对
+  引号，引擎侧该开关默认关闭（见 `docs/text-rules.md`）。
+
+Chrome 那 58.5 ms 里，HTML 解析只占 **1.6 ms**（3%），样式解算 + 布局 + 分栏占
+56.8 ms。也就是说“浏览器替我们多做了一大堆前置工作”在这份语料上**不成立**：差距
+不来自它多做的那部分，而来自运行时和实现语言。
+
+两行不能这样比：
+
+- **翻页**：layx 6.2 ms（冷）/ 5.6 ms（热）**包含 canvas 光栅化**；Chrome 的 0.0 ms
+  只是平移一个已经画好的图层。核心不画，这笔账在宿主。
+- **内存**：wasm 141.6 MB 与 JS heap 1.5 MB 不是同一个堆（Chrome 的布局对象在 C++
+  堆里），不可比。
+
+### 2. 规模与分配（原生，500 万字）
+
+文泉驿微米黑，18px，600×900 视口，只做布局（不含绘制）：
 
 | Workers | 时间 | 分配 |
 |---:|---:|---:|
@@ -214,11 +260,17 @@ PaintKey = hash(PageKey, theme)
 分配量是总量，非常驻内存；行盒/页映射常驻，shaped glyph 不保留。同一台机器上
 500 万字行高重排 22 ms，20 万字段间距重排 0.17 ms（均只重算 y 和页映射）。
 
-复现（换成任何覆盖中文的字体）：
+### 3. 复现
 
 ```sh
-LAYX_CJK_FONT=/usr/share/fonts/truetype/wqy/wqy-microhei.ttc \
-LAYX_CJK_FONT_INDEX=0 \
+# 浏览器对照。ab.sh 走 @font-face，需要单 face TTF（.ttc 会被 Chrome 的 OTS 拒绝）
+LAYX_FONT=/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf \
+  ./scripts/ab.sh book --chars 200000 --turns 100 --repeat 3
+
+# 同一语料的原生基线（同一份字体字节）
+go run ./tools/bench_native -font /path/to/same.ttf -workers 1 -runs 3
+
+# 500 万字基准
 go test ./render -run '^$' -bench 'BenchmarkLayout5M|BenchmarkRelayout' -benchtime 1x
 ```
 
@@ -230,14 +282,17 @@ go test ./render -race -count=1
 go vet ./...
 ```
 
-三个对照脚本需要 `curl` 和 Chrome/Chromium（或 `CHROME=/path/to/chrome`）：
+对照脚本需要 `curl` 和 Chrome/Chromium（或 `CHROME=/path/to/chrome`）：
 
 - `./scripts/linecmp.sh {cjk,latin,mixed-ja,punct}`：同一份字体字节交给引擎与浏览器，
   逐**行**比对内容（native 侧导出行盒，浏览器侧用 `Range.getClientRects()`）。
   纯中文 54/54、英文 42/42、日英混排 63/63、对话密集 + 挤压 70/70 行内容一致。
 - `./scripts/ab.sh book --chars 200000 --turns 100`：同一个 Chromium 里跑 layx-wasm 与
   DOM + CSS multi-column，比对首页耗时、整书布局、冷/热翻页、字号重排、行高重分页。
-  脚本用像素哈希探测字体覆盖并剔除画不出的段落，避免两侧量的不是同一段文字。
+  脚本用像素哈希探测字体覆盖并剔除画不出的段落，避免两侧量的不是同一段文字。浏览器
+  侧的 setup 会拆成 HTML 解析与样式+布局两段，且字号/行高重排走 `Relayout`（变体缓存）
+  而不是重新冷布局。
+- `tools/bench_native`：同一份语料在原生 Go 下跑，用来和上面的浏览器数字对照。
 - `./scripts/snapshot.sh base` / `./scripts/snapshot.sh change --pages 1,2`：无头浏览器
   截图并按阶段做像素差异对比，产物在 `snapshots/`（gitignored）。
 
@@ -250,8 +305,9 @@ go vet ./...
   逗号/句号不压缩，因为 Chromium 在这套字体上也没压它们。悬挂只在关闭断字时生效。
 - `Typography.Rules` 的零值按规范初始值处理（`Widows`/`Orphans` 为 2/2）。想要"填满
   页面、不做孤寡行保护"写 `1`。
-- `examples/wasm` 的浏览器 demo 仍直接调用 `Engine.Layout`，没有使用 `Relayout` 的
-  变体缓存。
+- `examples/wasm` 的阅读器界面在改字号/行高时仍直接调 `Engine.Layout`，每次都是冷布局；
+  benchmark 路径（`examples/wasm/bench.go`）已经改走 `Relayout`，所以性能数字反映引擎
+  能力，而 demo 的手感比引擎实际能做到的差。
 - fixed-layout / 脚本化 EPUB 不在 IR 的表达范围内：核心只接受已解析、可重排的
   `Document`，这类内容的处置是宿主的事。
 - **不提供诊断输出**：IR 表达不了的内容（表格、ruby、竖排等）目前不会被报告，宿主需要
@@ -263,8 +319,9 @@ go vet ./...
 - `Progress` 的两种模式分母不同（分页 = 页数 × 页内高，含页边距；滚动 = 连续流高度，
   不含页边距），所以同一个位置在两种模式下的百分比不完全相同，且 `Location` 指向行盒
   顶边、最后一行的进度略小于 1。跨模式比较进度请先统一模式，或直接用 `Location`。
-- 性能上：单核与 Blink 打平，多核快 3–5×，改行高快一个数量级；滚动/翻页的合成优势
-  在宿主，核心只提供 tile DisplayList。
+- 性能上（同语料 A/B，见上面的表）：原生单线程与 Blink 同级，多核快 4–5×，行高重排
+  快 22×；**但 wasm 单线程比原生慢 4.6×**，所以在浏览器里跑 layx 目前比浏览器自己的
+  排版慢。滚动/翻页的合成优势在宿主，核心只提供 tile DisplayList。
 
 ## 许可
 

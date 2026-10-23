@@ -213,7 +213,11 @@ func runBench(text string, w, h, size, lineHeight float64, justify bool, turns i
 		turns = 1
 	}
 
-	eng, err := render.New(render.Options{Workers: 0})
+	// PageCache defaults to 4, which is smaller than the turn loop below: with
+	// the default every access misses and the "hot" pass measures DisplayList
+	// construction, not replay. Size it to the benchmark so cold and hot mean
+	// what their names say.
+	eng, err := render.New(render.Options{Workers: 0, PageCache: turns + 8})
 	if err != nil {
 		return res, err
 	}
@@ -256,10 +260,16 @@ func runBench(text string, w, h, size, lineHeight float64, justify bool, turns i
 		res.HotMS = append(res.HotMS, msSince(t0))
 	}
 
+	// Reflow and repagination go through Relayout, not Layout: a fresh
+	// Engine.Layout call passes a nil variant cache, so it re-shapes and
+	// re-breaks the whole document and measures a cold layout twice. Relayout
+	// keeps the BreakKey/PageKey caches, which is what a reader's settings
+	// panel actually exercises: font size must re-break, line height must only
+	// re-stack and re-paginate.
 	reflow := benchLayoutOptions(w, h, size, lineHeight, justify, state.fonts)
 	reflow.Typography.FontSize = 24
 	t0 = time.Now()
-	if _, err := eng.Layout(ctx, doc, reflow); err != nil {
+	if _, err := layout.Relayout(ctx, reflow); err != nil {
 		return res, err
 	}
 	res.ReflowMS = msSince(t0)
@@ -267,7 +277,7 @@ func runBench(text string, w, h, size, lineHeight float64, justify bool, turns i
 	repage := benchLayoutOptions(w, h, size, lineHeight, justify, state.fonts)
 	repage.Typography.LineHeight = float32(lineHeight * 1.2)
 	t0 = time.Now()
-	if _, err := eng.Layout(ctx, doc, repage); err != nil {
+	if _, err := layout.Relayout(ctx, repage); err != nil {
 		return res, err
 	}
 	res.RepageMS = msSince(t0)
