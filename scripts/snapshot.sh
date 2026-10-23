@@ -8,7 +8,7 @@
 #   scripts/snapshot.sh --compare M0 M1      # rebuild comparison + index only
 #
 # Options: --w 640 --h 900 --size 18 --lh 1.65 --theme 0 --justify 0|1
-#          --dpr 2 --pages 1,2,3 --no-build --port 8098
+#          --dpr 2 --pages 1,2,3 --note "what changed" --no-build --port 8098
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
@@ -18,6 +18,7 @@ stage=""
 compare_only=0
 prev_stage=""
 w=640 h=900 size=18 lh=1.65 theme=0 justify=1 dpr=2 pages="" build=1 port=${LAYX_SNAPSHOT_PORT:-8098}
+note=""
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -34,6 +35,7 @@ while [ $# -gt 0 ]; do
     --dpr) dpr=$2; shift 2 ;;
     --pages) pages=$2; shift 2 ;;
     --port) port=$2; shift 2 ;;
+    --note) note=$2; shift 2 ;;
     --no-build) build=0; shift ;;
     -h|--help) sed -n '2,16p' "$0"; exit 0 ;;
     -*) echo "unknown option: $1" >&2; exit 2 ;;
@@ -110,6 +112,12 @@ if [ "$compare_only" = 0 ]; then
     printf 'commit: %s\n' "$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
     printf 'pages: %s\n' "$total"
     printf 'params: w=%s h=%s size=%s lh=%s theme=%s justify=%s dpr=%s\n' "$w" "$h" "$size" "$lh" "$theme" "$justify" "$dpr"
+    if git diff --quiet -- . 2>/dev/null && git diff --cached --quiet -- . 2>/dev/null; then
+      printf 'tree: clean\n'
+    else
+      printf 'tree: dirty\n'
+    fi
+    [ -n "$note" ] && printf 'note: %s\n' "$note"
   } >"$out/meta.txt"
 fi
 
