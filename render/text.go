@@ -206,6 +206,9 @@ func (w *textWorker) shapeRange(p *paragraph, start, end int, defaultLang langua
 	if w.typo.Rules.Autospacing {
 		w.addAutospacing(p, out)
 	}
+	if w.typo.Rules.PunctuationCompression {
+		w.compressPunctuation(p, out, start, end)
+	}
 	return out
 }
 
@@ -448,6 +451,23 @@ func (w *textWorker) wrapParagraph(
 		lineHeight = typo.LineHeight
 	}
 
+	// Hanging punctuation needs each rune's advance at line boundaries. It is
+	// off by default and interacts with synthetic hyphens and re-mapped rune
+	// indices, so those two features turn it off for the paragraph.
+	hang := typo.Rules.HangingPunctuation && origIndex == nil && len(wrapHyph) == 0
+	var runeAdv []float32
+	if hang {
+		runeAdv = make([]float32, len(wrapPara.text))
+		for oi := range outs {
+			for _, g := range outs[oi].Glyphs {
+				idx := g.TextIndex()
+				if idx >= 0 && idx < len(runeAdv) {
+					runeAdv[idx] += float32(g.Advance) / 64
+				}
+			}
+		}
+	}
+
 	// wrapOnce lays out the paragraph, measuring synthetic hyphens as zero
 	// width. A break at a hyphen adds its real advance afterwards. If that
 	// makes any line exceed its width, a second pass reserves the widest
@@ -456,6 +476,11 @@ func (w *textWorker) wrapParagraph(
 		w.wrapper.Prepare(config, wrapPara.text, shaping.NewSliceIterator(outs))
 		lines := make([]lineBox, 0, len(p.text)/24+1)
 		lineStart := 0
+		// placed is the first rune not yet put on a line. Hanging punctuation
+		// moves a rune or two past the wrapper's break, so following wrapper
+		// lines may start before it; the box then starts at placed and its
+		// width loses the already-placed advance.
+		placed := 0
 		first := true
 		y := float32(0)
 		overflow := false
@@ -486,6 +511,23 @@ func (w *textWorker) wrapParagraph(
 				// Defensive: the wrapper should always make progress. Rather
 				// than spin forever on corrupt input, stop the paragraph here.
 				break
+			}
+			dispStart := lineStart
+			if placed > dispStart {
+				dispStart = placed
+			}
+			if dispStart >= lineEnd {
+				// This wrapper line was placed entirely on the previous one;
+				// nothing is left to put here.
+				if done {
+					if len(lines) > 0 {
+						lines[len(lines)-1].last = true
+					}
+					break
+				}
+				lineStart = lineEnd
+				first = false
+				continue
 			}
 
 			var (
@@ -521,6 +563,11 @@ func (w *textWorker) wrapParagraph(
 					lineHeightMax = h
 				}
 			}
+			// The prefix [lineStart, dispStart) already belongs to the
+			// previous line.
+			for i := lineStart; i < dispStart; i++ {
+				lineWidth -= runeAdv[i]
+			}
 			height := lineHeightMax
 			if minH := ascent + descent; height < minH {
 				height = minH
@@ -533,6 +580,29 @@ func (w *textWorker) wrapParagraph(
 					lineWidth += adv
 				}
 			}
+			// Try to hang a closing mark that the wrapper pushed to the next
+			// line. allow-end lets the mark overhang by half its own advance;
+			// when that is enough, the mark (and the character it was glued
+			// to) stays on this line.
+			startRune := dispStart
+			if hang && !done {
+				if k := hangingPullCount(wrapPara.text, lineEnd); k > 0 {
+					adv := float32(0)
+					for i := 0; i < k; i++ {
+						adv += runeAdv[lineEnd+i]
+					}
+					over := lineWidth + adv - maxW
+					if over <= 0 || over <= 0.5*runeAdv[lineEnd+k-1]+0.01 {
+						lineWidth += adv
+						lineEnd += k
+						if lineEnd >= len(wrapPara.text) {
+							done = true
+						}
+					}
+				}
+			}
+			placed = lineEnd
+
 			leading := height - ascent - descent
 			if leading < 0 {
 				leading = 0
@@ -549,9 +619,9 @@ func (w *textWorker) wrapParagraph(
 			if first {
 				x += indent
 			}
-			start, endRune := int32(lineStart), int32(lineEnd)
+			start, endRune := int32(startRune), int32(lineEnd)
 			if origIndex != nil {
-				start = origIndex[lineStart]
+				start = origIndex[startRune]
 				endRune = origIndex[lineEnd]
 			}
 			lines = append(lines, lineBox{

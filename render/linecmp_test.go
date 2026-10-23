@@ -18,6 +18,11 @@ import (
 // suite. Line boxes are only reachable from inside the package, which is why
 // the dump is a test rather than a tool under tools/.
 //
+// LPX_RULES selects the engine's opt-in typographic policies, comma separated:
+// "compress" (punctuation compression), "hanging" (hanging punctuation) and
+// "autospacing" (CJK/Latin gaps). The browser side controls the same policies
+// with text-spacing-trim, so scripts/linecmp.sh sets LPX_RULES per row.
+//
 // The dump format is one line per box:
 //
 //	index <tab> paragraph line <tab> width <tab> avail <tab> y <tab> height <tab> text
@@ -49,6 +54,7 @@ func TestLineBoxes(t *testing.T) {
 		indent = size * 2
 		gap = size * 0.5
 	}
+	rules := parseLinecmpRules(os.Getenv("LPX_RULES"))
 	width, height := float32(640), float32(900)
 	if v := os.Getenv("LPX_VIEWPORT"); v != "" {
 		fmt.Sscanf(v, "%gx%g", &width, &height)
@@ -89,7 +95,7 @@ func TestLineBoxes(t *testing.T) {
 		Viewport: Viewport{Width: width, Height: height},
 		Typography: Typography{
 			FontFamily: "book", FontSize: size, LineHeight: lineHeight,
-			Color: paint.Color{A: 0xff}, Rules: TextRules{Widows: 1, Orphans: 1},
+			Color: paint.Color{A: 0xff}, Rules: rules,
 		},
 		Fonts:   fonts,
 		Margins: paint.Insets{Top: 40, Right: 40, Bottom: 40, Left: 40},
@@ -116,4 +122,25 @@ func TestLineBoxes(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Logf("line boxes: %d, pages: %d", n, lay.PageCount())
+}
+
+// parseLinecmpRules maps the LPX_RULES environment value to TextRules. Widow
+// and orphan protection is disabled explicitly: the browser's multicol
+// fragmentation does not apply it, so neither should this fixture.
+func parseLinecmpRules(v string) TextRules {
+	rules := TextRules{Widows: 1, Orphans: 1}
+	for _, name := range strings.Split(v, ",") {
+		switch strings.TrimSpace(name) {
+		case "":
+		case "compress":
+			rules.PunctuationCompression = true
+		case "hanging":
+			rules.HangingPunctuation = true
+		case "autospacing":
+			rules.Autospacing = true
+		default:
+			panic("unknown LPX_RULES entry: " + name)
+		}
+	}
+	return rules
 }

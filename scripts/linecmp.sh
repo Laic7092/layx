@@ -21,10 +21,15 @@
 # --trim controls CSS text-spacing-trim on the browser side. "default" leaves
 # Chrome's own default (which trims fullwidth punctuation), "space-all" turns
 # the trimming off, and "both" runs each and prints both rows: the difference
-# between the two rows is exactly what punctuation compression would recover.
+# between the two rows is exactly what punctuation compression recovers.
 # A build that parses the property but ignores it during line breaking gets a
 # note, so the space-all row is never read as a real result. Pass --chrome to
 # choose the browser, since support differs between them.
+#
+# The punct mode also turns on the engine's own policy switches per row, via
+# LPX_RULES: rows where the browser trims (the "default"/"normal" labels) run
+# with compress on, and the space-all row runs with every policy off, so each
+# row compares like with like. Other corpora run with the zero-value rules.
 #
 # Exit status is 0 even when the rows differ, because the punctuation gap is a
 # known, documented one. Pass --strict to make a mismatch fail the run.
@@ -51,7 +56,7 @@ while [ $# -gt 0 ]; do
     --chrome) CHROME=$2; shift 2 ;;
     --strict) strict=1; shift ;;
     --keep) keep=$2; shift 2 ;;
-    -h|--help) sed -n '2,30p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,38p' "$0"; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -109,11 +114,25 @@ cp "$corpus" "$work/corpus.txt"
 go build -o "$work/server" ./examples/wasm/server || exit 1
 
 echo "==> linecmp: mode=$mode font=$font viewport=${w}x${h} size=$size lh=$lh"
-LPX_TEXT="$corpus" LPX_OUT="$work/native.txt" LPX_FONT="$font" \
-  LPX_VIEWPORT="${w}x${h}" LPX_SIZE="$size" \
-  go test ./render -run TestLineBoxes -count=1 -v 2>&1 |
-  grep -E "line boxes|FAIL|panic" | sed 's/^/    native: /'
-[ -s "$work/native.txt" ] || { echo "native dump is empty" >&2; exit 1; }
+
+dump_native() {
+  local label=$1 rules=$2 out="$work/native-$label.txt"
+  LPX_TEXT="$corpus" LPX_OUT="$out" LPX_FONT="$font" \
+  LPX_VIEWPORT="${w}x${h}" LPX_SIZE="$size" LPX_RULES="$rules" \
+    go test ./render -run TestLineBoxes -count=1 -v 2>&1 |
+    grep -E "line boxes|FAIL|panic" | sed "s/^/    native[$label]: /"
+  [ -s "$out" ] || { echo "native dump is empty (label $label)" >&2; exit 1; }
+}
+
+# rules_for picks the engine policies for a browser trim label. The browser
+# only applies text-spacing-trim when the corpus is punctuation-dense and the
+# label is not space-all.
+rules_for() {
+  local label=$1
+  if [ "$mode" = punct ] && [ "$label" != space-all ]; then
+    printf 'compress'
+  fi
+}
 
 run_browser() {
   local trimarg=$1 out=$2
@@ -159,14 +178,16 @@ case "$trim" in
   *) trims=("$trim") ;;
 esac
 
-printf '\n%-9s %-10s %8s %7s %7s %10s %8s\n' "mode" "trim" "native" "chrome" "pages" "identical" "chars/l"
+printf '\n%-9s %-10s %8s %7s %7s %10s %8s %s\n' "mode" "trim" "native" "chrome" "pages" "identical" "chars/l" "rules"
 fail=0
 for t in "${trims[@]}"; do
   label=${t:-default}
+  rules=$(rules_for "$label")
+  dump_native "$label" "$rules"
   run_browser "$t" "chrome-$label.txt"
-  python3 - "$work/native.txt" "$work/chrome-$label.txt" "$work/chrome-$label.txt.json" "$mode" "$label" <<'PY' || fail=1
+  python3 - "$work/native-$label.txt" "$work/chrome-$label.txt" "$work/chrome-$label.txt.json" "$mode" "$label" "$rules" <<'PY' || fail=1
 import json, sys
-nat_path, chr_path, meta_path, mode, label = sys.argv[1:6]
+nat_path, chr_path, meta_path, mode, label, rules = sys.argv[1:7]
 nat = [l.rstrip('\n').split('\t') for l in open(nat_path)]
 ntext = [r[6] for r in nat]
 ctext = [l.rstrip('\n') for l in open(chr_path)]
@@ -174,13 +195,14 @@ meta = json.load(open(meta_path))
 same = sum(1 for a, b in zip(ntext, ctext) if a == b)
 n = max(len(ntext), len(ctext)) or 1
 cov = meta.get('coverage', {})
-printf = ('%-9s %-10s %8d %7d %7s %10s %8.1f'
+printf = ('%-9s %-10s %8d %7d %7s %10s %8.1f %s'
           % (mode, label, len(ntext), len(ctext), meta.get('pageCount', '?'),
              '%d/%d' % (same, n),
-             (sum(len(t) for t in ntext) / max(1, len(ntext)))))
+             (sum(len(t) for t in ntext) / max(1, len(ntext))),
+             rules or '-'))
 print(printf)
-if label != 'default' and not meta.get('trimSupported', True):
-    print('    note: this browser ignores text-spacing-trim: %s' % label)
+if rules == 'compress' and not meta.get('trimSupported', True):
+    print('    note: this browser ignores text-spacing-trim; engine compression has no browser counterpart on this row')
 if same != n:
     for i, (a, b) in enumerate(zip(ntext, ctext)):
         if a != b:

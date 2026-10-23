@@ -214,7 +214,7 @@ func (l *Layout) buildLine(w *textWorker, it *flowItem, chapter int) ([]paint.Gl
 	var weights []float32
 	factor := float32(0)
 	if extra > 0 && glyphCount > 1 {
-		weights = justifyWeights(p.text, runs)
+		weights = justifyWeights(p.text, runs, w.typo.Rules.PunctuationCompression)
 		total := float32(0)
 		for _, wgt := range weights {
 			total += wgt
@@ -316,7 +316,11 @@ func (l *Layout) buildLine(w *textWorker, it *flowItem, chapter int) ([]paint.Gl
 // their own advance, and CJK inter-character gaps take slack at full weight.
 // Gaps touching punctuation get half weight, so fullwidth punctuation does
 // not turn into a hole.
-func justifyWeights(text []rune, runs []shapedRun) []float32 {
+//
+// When punctuation compression is on, the slack must not flow back into the
+// half em the trim removed. That space sits after the trimmed opening mark, so
+// the weight on that mark is zeroed.
+func justifyWeights(text []rune, runs []shapedRun, compress bool) []float32 {
 	idx := make([]int, 0, 64)
 	for i := range runs {
 		for _, g := range runs[i].out.Glyphs {
@@ -345,6 +349,27 @@ func justifyWeights(text []rune, runs []shapedRun) []float32 {
 			weights[k-1] += 0.5
 		} else {
 			weights[k-1] += 1
+		}
+	}
+	if compress {
+		for k := 1; k < len(idx); k++ {
+			a, b := idx[k-1], idx[k]
+			if b != a+1 {
+				continue
+			}
+			target, ok := trimTarget(text, a, b)
+			if !ok {
+				continue
+			}
+			// The slack must not flow back into the half em the trim removed.
+			// An opening mark loses its leading half, so the removed space is
+			// the gap after it; a closing mark loses its trailing half, which
+			// is the gap between the pair.
+			if target == b {
+				weights[k] = 0
+			} else {
+				weights[k-1] = 0
+			}
 		}
 	}
 	return weights

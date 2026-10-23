@@ -43,7 +43,7 @@
 | `HangingPunctuation`（行末悬挂） | **off** | CSS Text L4 `hanging-punctuation` | BreakKey |
 | `JustifyStrategy` | 只分配空格 | CSS Text L3 §7.3 | 绘制期，不影响断行 |
 | `ParagraphGap` | `0` | CSS 由样式给 margin，引擎不自作主张 | PageKey |
-| `Widows` / `Orphans` | **关闭** | CSS Fragmentation L3 §4.4；浏览器多不实现 | PageKey |
+| `Widows` / `Orphans` | **关闭** | CSS Fragmentation L3 §4.4；浏览器多不实现 | 只影响分页，但随 `TextRules` 整体进 BreakKey |
 
 几点说明：
 
@@ -51,11 +51,15 @@
   应能单独开关。挤压调整行内宽度分配，悬挂允许标点探出边界，二者对断行的
   影响不同。
 - 挤压的影响已经量化，不是估计：用 `scripts/linecmp.sh punct` 跑同一段对话密集
-  的中文，浏览器默认（`text-spacing-trim: normal`）每行比我们多 1–2 个字、
+  的中文，浏览器默认（`text-spacing-trim: normal`）每行比不挤压时多 1–2 个字、
   70 行里有 28 行断点不同；把浏览器挤压关掉（`--trim space-all`）后 **70/70 行
-  完全一致**。所以"引擎不自作主张、默认不挤压"这条政策是有数据支撑的取舍，
-  实现时按 `text-spacing-trim: normal` 的规则（成对标点各收半宽），并用同一份
-  语料做验收。
+  完全一致**。所以"引擎不自作主张、默认不挤压"这条政策是有数据支撑的取舍。
+  打开 `TextRules.PunctuationCompression` 后同一份语料也是 **70/70**。
+- 但"浏览器压缩了哪些标点"取决于字体：同一段文字、同一份字体字节，Chromium 在
+  Droid Sans Fallback 上只压缩引号（`：“` 28 处），`。”`、`——`、`……` 都没动；
+  引号来自回退字体，主字体提供的全角括号和逗号没有参与。引擎的挤压规则因此
+  按 linecmp 的可观测结果固定为引号类标点（`render/punct_test.go`），不假装
+  自己比浏览器多知道一层“字体是否支持压缩”。
 - `Autospacing`（1/8 em）曾经是无条件执行的，与"零值 = 规范默认"冲突；现在由
   `TextRules.Autospacing` 驱动，默认 off。
 - `Widows` / `Orphans` 的零值就是"关闭"：`Typography.withDefaults()` 不再把 0
@@ -110,7 +114,7 @@
 - 分页与滚动必须共享同一份断行结果 —— 这是模型，不是开关。
 - "分页用一套断行、滚动用另一套"这类需求应被拒绝。
 
-## 已知与浏览器的差异（待补）
+## 已知与浏览器的差异
 
 当规范与浏览器实现冲突时，**跟规范**，并把差异记录在这里。已知候选：
 
@@ -118,7 +122,7 @@
 |---|---|---|---|
 | `widows` / `orphans` | CSS Fragmentation 3 §4.4 定义 | Chromium 长期未在 multicol 中实现 | 跟规范，默认关闭 |
 | margin collapsing 边界情况 | CSS 2.1 §8.3.1 | 各家实现有细节差异 | 跟规范 |
-| `text-spacing-trim` | CSS Text L4 | 实现较新，默认值在演进 | 默认 off，跟初始值 |
+| `text-spacing-trim` | CSS Text L4 定义字符类，成对标点各收半宽 | 按字体是否支持压缩决定行为；同一字体上可能只压一部分标点 | 开关默认 off；打开后按 linecmp 量到的浏览器行为（引号类）压缩 |
 
 ## 决策
 

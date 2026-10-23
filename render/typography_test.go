@@ -132,7 +132,7 @@ func TestJustifyWeights(t *testing.T) {
 	}
 
 	// 中 a 文 <space> b
-	w := justifyWeights([]rune("中a文 b"), mk(0, 1, 2, 3, 4))
+	w := justifyWeights([]rune("中a文 b"), mk(0, 1, 2, 3, 4), false)
 	// index 0 widens the 中|a gap, index 1 the a|文 gap, index 3 is the space
 	want := []float32{1, 1, 0, 1, 0}
 	for i := range want {
@@ -142,13 +142,13 @@ func TestJustifyWeights(t *testing.T) {
 	}
 
 	// Punctuation-adjacent gaps stretch at half weight: 中 ， 文
-	w = justifyWeights([]rune("中，文"), mk(0, 1, 2))
+	w = justifyWeights([]rune("中，文"), mk(0, 1, 2), false)
 	if w[0] != 0.5 || w[1] != 0.5 {
 		t.Fatalf("punctuation weights = %v, want [0.5 0.5 0]", w)
 	}
 
 	// Pure Latin: no stretchable slots inside a word.
-	w = justifyWeights([]rune("word"), mk(0, 1, 2, 3))
+	w = justifyWeights([]rune("word"), mk(0, 1, 2, 3), false)
 	for i, v := range w {
 		if v != 0 {
 			t.Fatalf("latin weights[%d] = %v, want 0", i, v)
@@ -237,5 +237,139 @@ func TestTypographyKeepsZeroRules(t *testing.T) {
 	}
 	if got.Rules.Autospacing || got.Rules.PunctuationCompression || got.Rules.HangingPunctuation {
 		t.Fatalf("withDefaults enabled an opt-in policy: %+v", got.Rules)
+	}
+}
+
+// cjkEm measures the advance of one ideograph at the size used by these tests.
+func cjkEm(t *testing.T, size float32) float32 {
+	t.Helper()
+	l := cjkParagraph(t, "天地", AlignLeft, 2000, size)
+	cf := &l.chapters[0]
+	for i := range cf.items {
+		if cf.items[i].kind == itemLine {
+			return cf.items[i].width / 2
+		}
+	}
+	t.Fatal("no line in reference layout")
+	return 0
+}
+
+// TestPunctuationCompression pins the engine-side pair rule: the opening quote
+// after a fullwidth colon gives up half an em before wrapping, which is what
+// makes the line fit one more glyph than without compression.
+func TestPunctuationCompression(t *testing.T) {
+	em := cjkEm(t, 18)
+	text := "天：“地”玄"
+	plain := cjkParagraph(t, text, AlignLeft, 5.7*em, 18)
+	compressed := cjkParagraphRules(t, text, AlignLeft, 5.7*em, 18, TextRules{PunctuationCompression: true})
+
+	lines := func(l *Layout) []string {
+		var out []string
+		for i := range l.chapters[0].items {
+			it := &l.chapters[0].items[i]
+			if it.kind == itemLine {
+				out = append(out, string(it.para.text[it.start:it.end]))
+			}
+		}
+		return out
+	}
+	if got, want := len(lines(plain)), 2; got != want {
+		t.Fatalf("uncompressed line count = %d (%q), want %d", got, lines(plain), want)
+	}
+	if got := lines(compressed); len(got) != 1 || got[0] != text {
+		t.Fatalf("compressed lines = %q, want the whole paragraph on one line", got)
+	}
+
+	// The trim lives in the wrapped advances, so it is visible while drawing.
+	p := &posPainter{}
+	compressed.Page(0).Draw(p)
+	glyphs := firstLineGlyphs(p)
+	if len(glyphs) < 3 {
+		t.Fatalf("expected glyphs, got %d", len(glyphs))
+	}
+	if want := em / 2; !near(glyphs[2].advance, want, 0.05) {
+		t.Fatalf("compressed quote advance = %.3f, want %.3f", glyphs[2].advance, want)
+	}
+}
+
+// TestJustifyWeightsSkipsCompressedGap makes sure justification does not reopen
+// a trimmed pair: the boundary between the two compressed glyphs has no weight.
+func TestJustifyWeightsSkipsCompressedGap(t *testing.T) {
+	mk := func(runes ...int) []shapedRun {
+		gl := make([]shaping.Glyph, len(runes))
+		for i, r := range runes {
+			gl[i] = shaping.Glyph{ClusterIndex: r, Advance: 100}
+		}
+		return []shapedRun{{out: shaping.Output{Glyphs: gl}}}
+	}
+	// “ is the trimmed glyph, so the gap after it must not absorb slack.
+	w := justifyWeights([]rune("天：“地"), mk(0, 1, 2, 3), true)
+	if w[2] != 0 {
+		t.Fatalf("gap after the trimmed mark = %v, want 0 (all: %v)", w[2], w)
+	}
+	// Without compression the same gap is a normal ideograph gap.
+	w = justifyWeights([]rune("天：“地"), mk(0, 1, 2, 3), false)
+	if w[2] <= 0 {
+		t.Fatalf("uncompressed gap after the mark = %v, want > 0", w[2])
+	}
+}
+
+// TestHangingPunctuation pins the geometry of allow-end: a closing mark that
+// just misses the content box may hang by at most half its own advance, and
+// the box itself is not widened.
+func TestHangingPunctuation(t *testing.T) {
+	em := cjkEm(t, 18)
+	const size = float32(18)
+	width := 5.7 * em
+	text := "天地玄黄宇。"
+
+	plain := cjkParagraph(t, text, AlignLeft, width, size)
+	hang := cjkParagraphRules(t, text, AlignLeft, width, size, TextRules{HangingPunctuation: true})
+
+	var plainLines, hangLines []*flowItem
+	for i := range plain.chapters[0].items {
+		if it := &plain.chapters[0].items[i]; it.kind == itemLine {
+			plainLines = append(plainLines, it)
+		}
+	}
+	for i := range hang.chapters[0].items {
+		if it := &hang.chapters[0].items[i]; it.kind == itemLine {
+			hangLines = append(hangLines, it)
+		}
+	}
+	if len(plainLines) != 2 {
+		t.Fatalf("without hanging, expected the mark to wrap; got %d lines", len(plainLines))
+	}
+	if got := string(plainLines[1].para.text[plainLines[1].start:plainLines[1].end]); got != "宇。" {
+		t.Fatalf("without hanging, second line = %q, want %q", got, "宇。")
+	}
+	if len(hangLines) != 1 {
+		t.Fatalf("with hanging, expected one line; got %d", len(hangLines))
+	}
+	ln := hangLines[0]
+	if got := string(ln.para.text[ln.start:ln.end]); got != text {
+		t.Fatalf("hanging line text = %q, want %q", got, text)
+	}
+	over := ln.width - ln.avail
+	if over <= 0 {
+		t.Fatalf("hanging line does not overhang: width %.3f avail %.3f", ln.width, ln.avail)
+	}
+	if over > 0.5*em+0.01 {
+		t.Fatalf("hanging overhang = %.3f, want <= %.3f (half an em)", over, 0.5*em)
+	}
+	// The content box is untouched: same page size and same available width.
+	if got, want := hang.Page(0).Size().Width, plain.Page(0).Size().Width; got != want {
+		t.Fatalf("hanging changed the page width: %.1f vs %.1f", got, want)
+	}
+	if got, want := ln.avail, plainLines[0].avail; got != want {
+		t.Fatalf("hanging changed the available width: %.3f vs %.3f", got, want)
+	}
+	// Drawing must place the mark beyond the content box too, not clip it.
+	p := &posPainter{}
+	hang.Page(0).Draw(p)
+	glyphs := firstLineGlyphs(p)
+	last := glyphs[len(glyphs)-1]
+	if edge := last.x + last.advance; edge <= ln.avail {
+		t.Fatalf("last glyph edge = %.3f, want > avail %.3f", edge, ln.avail)
 	}
 }

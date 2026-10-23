@@ -90,7 +90,7 @@ Typography: render.Typography{
     LineHeight: 1.6,
     Color:      paint.Color{A: 0xff},
     Rules: render.TextRules{
-        PunctuationCompression: true,  // 成对全角标点各收半宽，与 Chrome 默认一致
+        PunctuationCompression: true,  // 成对引号收半宽，与 Chrome 默认逐行一致
         HangingPunctuation:     false, // 行末标点探出；浏览器默认不悬挂，默认关
         Autospacing:            false, // 中西文 1/8 em；Chrome 不加，混排想对齐浏览器就关
         Widows:                 2,     // 0 = 不保护
@@ -209,14 +209,22 @@ native 侧由 `render/linecmp_test.go` 导出每个行盒（文本、宽度、y�
 | 纯中文 | 54 | 54/54 | 3 == 3 |
 | 英文（同字体） | 42 | 42/42 | 2 == 2 |
 | 日文 + 英文混排 | 63 | 63/63 | 3 == 3 |
-| 中文对话、标点密集 | 70 | 42/70 | 3 == 3 |
-| 同上，`text-spacing-trim: space-all` | 70 | **70/70** | 3 == 3 |
+| 中文对话、标点密集（引擎 `compress` on） | 70 | **70/70** | 3 == 3 |
+| 同上，浏览器 `text-spacing-trim: space-all`（引擎规则全关） | 70 | **70/70** | 3 == 3 |
 
-最后两行是同一段文字：把浏览器的全角标点挤压关掉之后，逐行完全一致。也就是说
-断行本身（UAX #14 断点、行尾宽度、缩进、两端对齐前的自然宽度）与 Chrome 一致；
-**唯一的差别是 Chrome 默认的 `text-spacing-trim` 会压缩成对的全角标点**（`。”`、
-`：“`、`——`、`……`），我们还没做。对话密集的文本里它每行多放 1–2 个字，页数
-可能差一页。这就是“标点挤压”的量化依据，也是 A/B 里剩下的那 3% 页数差。
+最后两行是同一段文字，各自和对应的浏览器行为比：punct 模式下脚本用 `LPX_RULES`
+给 native 侧打开 `Typography.Rules.PunctuationCompression`，再和 Chrome 默认的
+`text-spacing-trim` 逐行比对；space-all 那行则关掉引擎的全部政策开关，和关掉
+浏览器挤压的结果比对。也就是说断行本身（UAX #14 断点、行尾宽度、缩进、两端对齐
+前的自然宽度）与 Chrome 一致，**挤压也一致**：42/70 → 70/70。
+
+这里有一个容易读错的细节：Chrome 的 `text-spacing-trim` 是**按字体**生效的，
+不是按字符类无条件生效。用 linecmp 的语料字体（Droid Sans Fallback）量下来，
+它实际压缩的是 `：“` 里的引号（28 处），而 `。”`、`——`、`……` 一个都没有变，
+因为冒号/句号来自主字体、引号来自回退字体，Chromium 只对“它认为支持压缩”的
+字形动手。引擎侧因此只压缩引号一类（以及同样被浏览器压缩的〈〉），规则表由
+`render/punct_test.go` 固定；对话密集的文本里它每行多放 1–2 个字，页数差一页。
+旧版 README 把“成对标点都会被压缩”当成结论，是拿总行数反推的误读。
 
 `--trim space-all` 这行依赖浏览器真的支持该属性：本机的 headless Chromium 145
 会解析却忽略它，Windows Chrome 则正确生效，脚本会在那种情况下打印 note。
@@ -277,9 +285,11 @@ Noto 路径，找不到则跳过（可用 `LAYX_CJK_FONT` / `LAYX_CJK_FONT_INDEX
 ## 已知限制 / 下一步
 
 - 尚未实现：表格、ruby、竖排、flex/grid、RTL 视觉序、浮动环绕、脚注、链接命中透传。
-- 标点压缩 / 行末标点悬挂（`text-spacing-trim`）尚未实现；目前依赖字体自带的
-  全角标点宽度。这一项的影响已经量化（见上一节）：对话密集的中文文本里，Chrome
-  靠挤压成对标点每行多放 1–2 个字；把挤压关掉后两边逐行一致。
+- 标点挤压（`Typography.Rules.PunctuationCompression`）与行末悬挂
+  （`HangingPunctuation`）默认都关，需要显式打开。挤压压缩“成对引号”的半宽，
+  规则按 linecmp 量到的浏览器行为固定（见上一节）；全角括号/逗号/句号不压缩，
+  因为 Chromium 在这套字体上也没压它们。悬挂允许行末收尾标点探出内容盒至多
+  半个字宽，且只在关闭断字时生效（行尾悬挂会改变换行位置，因此参与 `BreakKey`）。
 - 两端对齐会把余量分给空格和 CJK 字间隙；标点相邻的间隙按半权重参与。
 - **两个默认值是故意偏离旧行为的**（`docs/text-rules.md` 的决策）：
   `Typography.Rules.Widows` / `Orphans` 的零值现在是"关闭"，不再提升为 2/2；
@@ -298,8 +308,8 @@ Noto 路径，找不到则跳过（可用 `LAYX_CJK_FONT` / `LAYX_CJK_FONT_INDEX
   `Document`，这类内容的处置是宿主的事。
 - 与浏览器的差距：**已补齐** —— 边框/背景/圆角、下划线与删除线、
   `word-spacing`、合成粗体标记、可插拔断字（`render/hyphen/en` 内置 TeX
-  英文模式）；**能补没补** —— 标点挤压/悬挂（影响已量化，见 linecmp 一节）、表格、
-  脚注；**IR 不表达** —— flex/grid、竖排、ruby、transform、脚本。
+  英文模式）、标点挤压与行末悬挂（policy 开关，见 linecmp 一节）；**能补没补**
+  —— 表格、脚注；**IR 不表达** —— flex/grid、竖排、ruby、transform、脚本。
   “IR 不表达”只说明核心不认识这些结构，不说明宿主该怎么办：那是宿主的决定。
   核心的责任是把“这个文档里有我表达不了的东西”报告出来，而不是默默丢掉或
   自行降级——参见下面的“诊断”。
