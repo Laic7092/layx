@@ -9,3 +9,9 @@ coverage.*
 .DS_Store
 .idea/
 .vscode/
+
+# Generated wasm demo assets: run ./examples/wasm/build.sh to produce them.
+examples/wasm/web/layx.wasm
+examples/wasm/web/wasm_exec.js
+examples/wasm/web/wasm_exec_node.js
+examples/wasm/web/fonts/
