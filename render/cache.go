@@ -1,6 +1,7 @@
 package render
 
 import (
+	"container/list"
 	"hash/maphash"
 	"sync"
 )
@@ -52,6 +53,80 @@ type cacheKey struct {
 	chapter int
 	fonts   *FontSet
 	key     keyHash
+}
+
+// lineKey identifies one shaped line. The cache is scoped to a single Layout,
+// so a paragraph pointer is a stable identity for the lifetime of every entry.
+// The chapter and rune range are included so relayout variants never mix lines
+// whose shaping inputs could differ.
+type lineKey struct {
+	chapter int
+	para    *paragraph
+	start   int32
+	end     int32
+}
+
+type lineEntry struct {
+	key  lineKey
+	runs []shapedRun
+}
+
+// lineCache is a bounded LRU of shaped, not-yet-justified lines. Justification
+// depends on the line's available width and is applied by buildLine on every
+// use, so a shape result can be shared by every consumer of the same Layout.
+//
+// The value stores shaped runs, not flow items and not positioned glyph runs:
+// callers must treat the returned slice as read-only.
+type lineCache struct {
+	mu      sync.Mutex
+	limit   int
+	order   *list.List
+	entries map[lineKey]*list.Element
+}
+
+func newLineCache(limit int) *lineCache {
+	return &lineCache{
+		limit:   limit,
+		order:   list.New(),
+		entries: make(map[lineKey]*list.Element, limit),
+	}
+}
+
+func (c *lineCache) get(key lineKey) ([]shapedRun, bool) {
+	if c == nil || c.limit <= 0 {
+		return nil, false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	e, ok := c.entries[key]
+	if !ok {
+		return nil, false
+	}
+	c.order.MoveToFront(e)
+	return e.Value.(*lineEntry).runs, true
+}
+
+func (c *lineCache) put(key lineKey, runs []shapedRun) {
+	if c == nil || c.limit <= 0 {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if e, ok := c.entries[key]; ok {
+		e.Value.(*lineEntry).runs = runs
+		c.order.MoveToFront(e)
+		return
+	}
+	for c.order.Len() >= c.limit {
+		back := c.order.Back()
+		if back == nil {
+			break
+		}
+		delete(c.entries, back.Value.(*lineEntry).key)
+		c.order.Remove(back)
+	}
+	e := c.order.PushFront(&lineEntry{key: key, runs: runs})
+	c.entries[key] = e
 }
 
 // variantCache keeps the most recent whole-document variants. Capacity is

@@ -105,6 +105,21 @@ type Layout struct {
 
 	pool *sync.Pool
 
+	// lineCache is Layout-scoped: it dies with the variant, so evicting a
+	// BreakKey/PageKey variant also releases its shaped lines. It is bounded
+	// by Options.LineCache.
+	lineCache *lineCache
+
+	// Scroll-mode fields. chapterTop[i] is the content y of chapter i;
+	// contentHeight is the end of the last chapter's flow.
+	chapterTop    []float32
+	contentHeight float32
+	tileHeight    float32
+	tileCount     int
+	tileMu        sync.Mutex
+	tileCache     map[int]*Tile
+	tileOrder     []int
+
 	cacheMu    sync.Mutex
 	cache      map[int]*Page
 	cacheOrder []int
@@ -333,6 +348,7 @@ func (e *Engine) layoutDoc(ctx context.Context, doc *Document, opts LayoutOption
 		breakKeys: breakKeys,
 		pageKeys:  pageKeys,
 		paintKey:  currentPaintKey,
+		lineCache: newLineCache(e.lineCache),
 	}
 	l.chapters = make([]chapterFlow, nch)
 	for ci := 0; ci < nch; ci++ {
@@ -362,6 +378,7 @@ func (e *Engine) layoutDoc(ctx context.Context, doc *Document, opts LayoutOption
 		}
 		l.chapters[ci] = cf
 	}
+	l.initScroll()
 	return l, nil
 }
 
@@ -1124,8 +1141,14 @@ func checkDepth(ch *Chapter, maxDepth int) error {
 	return nil
 }
 
-// PageCount returns the total number of pages.
-func (l *Layout) PageCount() int { return len(l.pages) }
+// PageCount returns the total number of pages. Scroll-mode layouts have no
+// pages and return 0; use TileCount instead.
+func (l *Layout) PageCount() int {
+	if l.opts.Mode == ModeScroll {
+		return 0
+	}
+	return len(l.pages)
+}
 
 // Size returns the layout viewport.
 func (l *Layout) Size() paint.Size {
@@ -1147,8 +1170,12 @@ func (l *Layout) Locate(anchor AnchorID) (Location, bool) {
 	return Location{Chapter: pos.chapter, Node: pos.node, Anchor: anchor, Offset: pos.offset}, true
 }
 
-// PageOf returns the page containing loc.
+// PageOf returns the page containing loc. It is paged-mode only: scroll-mode
+// layouts return false because pages are not part of their coordinate space.
 func (l *Layout) PageOf(loc Location) (int, bool) {
+	if l.opts.Mode == ModeScroll {
+		return 0, false
+	}
 	if loc.Chapter < 0 || loc.Chapter >= len(l.chapters) {
 		return 0, false
 	}
@@ -1296,7 +1323,7 @@ func (l *Layout) Selection(from, to Location) []SelectionQuad {
 				if hi <= lo {
 					continue
 				}
-				x0, x1 := lineRuneX(w, it, lo, hi)
+				x0, x1 := l.lineRuneX(w, it, ci, lo, hi)
 				out = append(out, SelectionQuad{
 					Page: cf.firstPage + page,
 					Rect: paint.Rect{X: dx + it.x + x0, Y: dy, Width: x1 - x0, Height: it.height},

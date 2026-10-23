@@ -14,6 +14,11 @@ type Options struct {
 	Workers int
 	// PageCache is the number of rendered pages cached per Layout. 0 uses 4.
 	PageCache int
+	// TileCache is the number of scroll-mode tiles cached per Layout. 0 uses 8.
+	TileCache int
+	// LineCache is the maximum number of shaped lines retained per Layout.
+	// 0 uses 256. The cache is bounded, so it never grows with book size.
+	LineCache int
 	Limits    Limits
 }
 
@@ -102,18 +107,44 @@ func (t Typography) withDefaults() Typography {
 	return t
 }
 
+// Mode selects how the continuous flow is exposed.
+type Mode uint8
+
+const (
+	// ModePaged slices the flow into pages. It is the default and the only
+	// mode that supports PageCount/Page.
+	ModePaged Mode = iota
+	// ModeScroll exposes the whole book as one continuous content stream,
+	// sliced into fixed-height tiles by Tile.
+	ModeScroll
+)
+
 // LayoutOptions describes one layout variant.
 type LayoutOptions struct {
 	Viewport   Viewport
 	Typography Typography
 	Fonts      *FontSet
-	// Margins are page margins in CSS pixels.
+	// Margins are page margins in CSS pixels. In scroll mode the left and
+	// right values still inset content; the top and bottom values are page
+	// viewport insets and do not appear in content coordinates.
 	Margins paint.Insets
+	// Mode selects paged (default) or scrolling output. It does not affect
+	// line breaking or vertical stacking, so toggling it reuses cached flow.
+	Mode Mode
+	// TileHeight is the height of a scroll tile in content pixels. Zero uses
+	// Viewport.Height. It is ignored in paged mode.
+	TileHeight float32
 }
 
 func (o LayoutOptions) validate() (LayoutOptions, error) {
 	if o.Viewport.Width <= 0 || o.Viewport.Height <= 0 {
 		return o, fmt.Errorf("%w: viewport must be positive", ErrInvalidOptions)
+	}
+	if o.Mode > ModeScroll {
+		return o, fmt.Errorf("%w: unknown mode %d", ErrInvalidOptions, o.Mode)
+	}
+	if o.TileHeight < 0 {
+		return o, fmt.Errorf("%w: tile height must not be negative", ErrInvalidOptions)
 	}
 	contentW := o.Viewport.Width - o.Margins.Left - o.Margins.Right
 	contentH := o.Viewport.Height - o.Margins.Top - o.Margins.Bottom
@@ -142,6 +173,8 @@ func contentHeight(o LayoutOptions) float32 {
 type Engine struct {
 	workers   int
 	pageCache int
+	tileCache int
+	lineCache int
 	limits    Limits
 
 	// shapes counts shaping calls. Layout variants that reuse cached line boxes
@@ -157,6 +190,12 @@ func New(opts Options) (*Engine, error) {
 	if opts.PageCache < 0 {
 		return nil, fmt.Errorf("%w: negative page cache size", ErrInvalidOptions)
 	}
+	if opts.TileCache < 0 {
+		return nil, fmt.Errorf("%w: negative tile cache size", ErrInvalidOptions)
+	}
+	if opts.LineCache < 0 {
+		return nil, fmt.Errorf("%w: negative line cache size", ErrInvalidOptions)
+	}
 	workers := opts.Workers
 	if workers == 0 {
 		workers = runtime.GOMAXPROCS(0)
@@ -168,9 +207,19 @@ func New(opts Options) (*Engine, error) {
 	if pageCache == 0 {
 		pageCache = 4
 	}
+	tileCache := opts.TileCache
+	if tileCache == 0 {
+		tileCache = 8
+	}
+	lineCache := opts.LineCache
+	if lineCache == 0 {
+		lineCache = 256
+	}
 	return &Engine{
 		workers:   workers,
 		pageCache: pageCache,
+		tileCache: tileCache,
+		lineCache: lineCache,
 		limits:    opts.Limits.withDefaults(),
 	}, nil
 }

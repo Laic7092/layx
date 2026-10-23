@@ -70,6 +70,9 @@ func (p *Page) Links() []Link {
 // Page returns page n, or nil if n is out of range. The page is rendered on
 // first access and cached according to Options.PageCache.
 func (l *Layout) Page(n int) *Page {
+	if l.opts.Mode == ModeScroll {
+		return nil
+	}
 	if n < 0 || n >= len(l.pages) {
 		return nil
 	}
@@ -129,7 +132,7 @@ func (l *Layout) renderPage(n int) *Page {
 				p.links = append(p.links, Link{Rect: r, URL: it.link})
 			}
 		case itemLine:
-			runs, _ := buildLine(w, it)
+			runs, _ := l.buildLine(w, it, info.chapter)
 			for j := range runs {
 				runs[j].X += dx
 				// buildLine returns baselines relative to the line box, so the
@@ -145,7 +148,7 @@ func (l *Layout) renderPage(n int) *Page {
 				if int(seg.end) <= int(it.start) || int(seg.start) >= int(it.end) {
 					continue
 				}
-				x0, x1 := lineRuneX(w, it, int(seg.start), int(seg.end))
+				x0, x1 := l.lineRuneX(w, it, info.chapter, int(seg.start), int(seg.end))
 				p.links = append(p.links, Link{
 					Rect: paint.Rect{X: dx + it.x + x0, Y: itemY, Width: x1 - x0, Height: it.height},
 					URL:  seg.link,
@@ -170,13 +173,14 @@ func isJustifySpace(r rune) bool {
 }
 
 // buildLine shapes one line and returns drawable runs plus per-glyph positions
-// relative to the line item's left edge.
-func buildLine(w *textWorker, it *flowItem) ([]paint.GlyphRun, []glyphPos) {
+// relative to the line item's left edge. Shaped runs come from the Layout's
+// bounded line cache; justification is applied here, on every use.
+func (l *Layout) buildLine(w *textWorker, it *flowItem, chapter int) ([]paint.GlyphRun, []glyphPos) {
 	p := it.para
 	if p == nil || int(it.end) <= int(it.start) {
 		return nil, nil
 	}
-	runs := w.shapeRange(p, int(it.start), int(it.end), w.defaultLang)
+	runs := l.shapeLine(w, it, chapter)
 	if len(runs) == 0 {
 		return nil, nil
 	}
@@ -296,10 +300,28 @@ func justifyWeights(text []rune, runs []shapedRun) []float32 {
 	return weights
 }
 
+// shapeLine returns the cached shaped runs for a line, shaping on a miss. The
+// returned slice is shared and must be treated as read-only.
+func (l *Layout) shapeLine(w *textWorker, it *flowItem, chapter int) []shapedRun {
+	if it.para == nil || int(it.end) <= int(it.start) {
+		return nil
+	}
+	key := lineKey{chapter: chapter, para: it.para, start: it.start, end: it.end}
+	if runs, ok := l.lineCache.get(key); ok {
+		return runs
+	}
+	runs := w.shapeRange(it.para, int(it.start), int(it.end), w.defaultLang)
+	l.lineCache.put(key, runs)
+	return runs
+}
+
 // lineRuneX maps a paragraph rune range to line-local x coordinates. Positions
 // that fall inside a glyph cluster snap to that cluster's edge.
-func lineRuneX(w *textWorker, it *flowItem, lo, hi int) (float32, float32) {
-	pos := lineGlyphPositions(w, it)
+func (l *Layout) lineRuneX(w *textWorker, it *flowItem, chapter int, lo, hi int) (float32, float32) {
+	return runeXFromPos(l.lineGlyphPositions(w, it, chapter), lo, hi)
+}
+
+func runeXFromPos(pos []glyphPos, lo, hi int) (float32, float32) {
 	if len(pos) == 0 {
 		return 0, 0
 	}
@@ -325,8 +347,8 @@ func lineRuneX(w *textWorker, it *flowItem, lo, hi int) (float32, float32) {
 	return x0, x1
 }
 
-func lineGlyphPositions(w *textWorker, it *flowItem) []glyphPos {
-	_, pos := buildLine(w, it)
+func (l *Layout) lineGlyphPositions(w *textWorker, it *flowItem, chapter int) []glyphPos {
+	_, pos := l.buildLine(w, it, chapter)
 	return pos
 }
 
@@ -340,10 +362,22 @@ func (p *Page) HitTest(pt paint.Point) (Location, bool) {
 	y := pt.Y - l.opts.Margins.Top + info.top
 	w := l.pool.Get().(*textWorker)
 	defer l.pool.Put(w)
+	return l.hitTestItems(w, cf, info.chapter, info.first, info.last, x, y)
+}
 
+// hitTestItems implements page and layout hit testing in chapter content
+// coordinates. first/last bound the items that may be hit (a page range, or
+// the whole chapter for scroll layouts).
+func (l *Layout) hitTestItems(w *textWorker, cf *chapterFlow, chapter, first, last int, x, y float32) (Location, bool) {
+	if last > len(cf.items) {
+		last = len(cf.items)
+	}
+	if first < 0 {
+		first = 0
+	}
 	best := -1
 	bestDist := float32(1e30)
-	for i := info.first; i < info.last && i < len(cf.items); i++ {
+	for i := first; i < last; i++ {
 		it := &cf.items[i]
 		width := it.width
 		if it.kind == itemLine {
@@ -362,12 +396,12 @@ func (p *Page) HitTest(pt paint.Point) (Location, bool) {
 	it := &cf.items[best]
 	if it.kind == itemImage {
 		return Location{
-			Chapter: info.chapter,
+			Chapter: chapter,
 			Node:    it.node,
 			Anchor:  cf.nodeAnchor[it.node],
 		}, true
 	}
-	pos := lineGlyphPositions(w, it)
+	pos := l.lineGlyphPositions(w, it, chapter)
 	if len(pos) == 0 {
 		return Location{}, false
 	}
@@ -391,7 +425,7 @@ func (p *Page) HitTest(pt paint.Point) (Location, bool) {
 		off = 0
 	}
 	return Location{
-		Chapter: info.chapter,
+		Chapter: chapter,
 		Node:    seg.node,
 		Anchor:  cf.nodeAnchor[seg.node],
 		Offset:  off,
