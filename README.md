@@ -3,7 +3,7 @@
 纯 Go 的 reflowable 文档排版 / 渲染内核。输入是宿主已经解析、级联好的 `render.Document`，
 输出是分页结果、`DisplayList` 和命中/选区/锚点映射。**不解析 EPUB/XHTML/CSS，不内置光栅器。**
 
-当前进度：**M0 已落地，M1 排版质量进行中**。
+当前进度：**M0、M1 已落地；M3 的三层缓存已进入核心，M2 未开始**。
 
 ```text
 宿主/编译器                         本库
@@ -159,6 +159,22 @@ TTF 是 Droid Sans Fallback，它没有拉丁字形，于是 A/B 页面里的英
 冷/热翻页 p50/p99、字号重排、行高重分页、内存。尚未覆盖：应用冷启动、
 进程树 RSS、滚动掉帧、多线程 native（wasm 只有 GOMAXPROCS=1）。
 
+## 变体缓存（M3）
+
+`Layout.Relayout` 按三层 key 复用阶段产物：
+
+```text
+BreakKey = hash(text, fonts, fontSize, letterSpacing, width, lang, align, indent)
+PageKey  = hash(BreakKey, lineHeight, paragraphGap, pageHeight, margins, widows/orphans)
+PaintKey = hash(PageKey, theme)
+```
+
+- `BreakKey` 命中：不 shaping、不断行，直接复用 `breakUnit`。
+- `PageKey` 命中：复用行盒与页映射，只重算 y 和页边界。
+- 只保留每章最近 2 个变体；`breakUnit` 只存 rune 区间和行度量，不存 shaped glyph。
+
+实测（本机，500 万字）：行高重排 22ms，段间距重排（20 万字）0.16ms。
+
 ## 测试
 
 ```sh
@@ -179,7 +195,8 @@ Noto 路径，找不到则跳过（可用 `LAYX_CJK_FONT` / `LAYX_CJK_FONT_INDEX
 - 两端对齐会把余量分给空格和 CJK 字间隙；标点相邻的间隙按半权重参与。
 - `keep-with-next`（标题不与正文分离）尚未实现，只有 `KeepTogether` 与
   `break-before/after`。
-- 行高 / 段间距变化目前仍走完整重排；`BreakKey` / `PageKey` 缓存是 M3。
+- 行高 / 段间距变化走 `Layout.Relayout` 的变体缓存（500 万字约 22ms）；但
+  `examples/wasm` 目前仍直接调用 `Engine.Layout`，所以浏览器 demo 没有用上这条路径。
 - 分页暂按行边界；复杂 `break-inside` 与跨页图片策略仍需细化。
 - 背景色、主题色由宿主通过 `Typography.Background` / `Style.Color` 提供，绘制后端自行决定。
 - 当前不做 fixed-layout / 脚本化 EPUB；按设计应走 WebView fallback。
