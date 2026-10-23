@@ -87,6 +87,8 @@ def merge(runs, label, workers):
         },
         "meta": {
             "corpusChars": runs[0]["corpusChars"],
+            "fontCoverage": runs[0].get("fontCoverage"),
+            "corpusParagraphsDropped": runs[0].get("corpusParagraphsDropped"),
             "readyMs": mm("readyMs"),
             "ua": runs[0]["ua"],
         },
@@ -154,6 +156,25 @@ def merge(runs, label, workers):
     return merged
 
 
+def coverage_note(merged):
+    """Warn when the corpus had to skip paragraphs the pinned face cannot draw."""
+    cov = merged.get("meta", {}).get("fontCoverage")
+    dropped = merged.get("meta", {}).get("corpusParagraphsDropped")
+    if cov is None:
+        return None
+    missing = [k for k, v in cov.items() if not v]
+    if not missing and not dropped:
+        return None
+    parts = []
+    if missing:
+        parts.append("font lacks " + ", ".join(missing))
+    if dropped:
+        parts.append(f"{dropped} paragraph(s) dropped from the corpus")
+    return ("; ".join(parts) +
+            " - the browser substitutes another face for those glyphs, so the"
+            " two sides would measure different text")
+
+
 def print_table(merged, out_path):
     nv, wv = merged["native"], merged["webview"]
     pool = merged.get("pool")
@@ -206,6 +227,9 @@ def print_table(merged, out_path):
         if isinstance(n, (int, float)) and isinstance(w, (int, float)) and w:
             ratio = f"{n / w:.2f}x"
         print(f"{name:32} {str(n):>22} {str(w):>22} {str(p):>12} {ratio:>14}")
+    note = coverage_note(merged)
+    if note:
+        print(f"note: {note}")
     if pool and "error" in pool:
         print(f"pool failed: {pool['error']} (fell back to the single-instance numbers)")
     print()

@@ -153,11 +153,47 @@ cat snapshots/index.md                   # 阶段元数据 + 图片 + 像素差�
 两边的字体必须是同一份字节。WebView 侧走 `@font-face`，而 Chrome 的 OTS
 会拒绝 `.ttc` 字体集，所以 `build.sh` 给 demo 选 WenQuanYi/Noto 这类好看的
 `.ttc`，`ab.sh` 则固定一个单 face `.ttf`。本机唯一同时支持 CJK 的单 face
-TTF 是 Droid Sans Fallback，它没有拉丁字形，于是 A/B 页面里的英文会显示成
-方框——两侧一致，计时不受影响。想要可读的输出就用
+TTF 是 Droid Sans Fallback，它没有拉丁字形：native 侧把英文画成 `.notdef`，
+浏览器却会换成别的字体，两侧量的就不是同一段文字了。所以 `ab.js` 会先探测
+字体覆盖（渲染像素哈希，见 `fontCoverage`），把字体画不出来的段落从语料里
+去掉，并在结果里记 `fontCoverage` / `corpusParagraphsDropped`；`ab_report.py`
+在表格下面打一行 note。早先那一版没有这条保护，英文段落贡献了一个**假的**
+27% 行数差（详见下一节）。想要可读且覆盖完整的输出，就用
 `LAYX_FONT=/path/to/single-face.ttf ./scripts/ab.sh ...`。覆盖：首页耗时、整书布局、
 冷/热翻页 p50/p99、字号重排、行高重分页、内存。尚未覆盖：应用冷启动、
 进程树 RSS、滚动掉帧、多线程 native（wasm 只有 GOMAXPROCS=1）。
+
+## 与浏览器的断行一致性（linecmp）
+
+`scripts/linecmp.sh` 把同一段文字、同一份字体字节交给两边，逐**行**比对内容：
+native 侧由 `render/linecmp_test.go` 导出每个行盒（文本、宽度、y），浏览器侧用
+`Range.getClientRects()` 把字符按行分组。A/B 比的是耗时，这里比的是断行。
+
+```sh
+./scripts/linecmp.sh cjk          # 纯中文，Droid Sans Fallback
+./scripts/linecmp.sh punct --trim both   # 对话密集、标点成串
+./scripts/linecmp.sh latin        # 英文，DejaVu Serif
+./scripts/linecmp.sh mixed-ja     # 日文 + 英文词 + 数字，IPA Gothic
+```
+
+四种语料、字体覆盖各自的文字，结果：
+
+| 语料 | 行数 | 行内容一致 | 页数 |
+|---|---|---|---|
+| 纯中文 | 54 | 54/54 | 3 == 3 |
+| 英文（同字体） | 42 | 42/42 | 2 == 2 |
+| 日文 + 英文混排 | 63 | 63/63 | 3 == 3 |
+| 中文对话、标点密集 | 70 | 42/70 | 3 == 3 |
+| 同上，`text-spacing-trim: space-all` | 70 | **70/70** | 3 == 3 |
+
+最后两行是同一段文字：把浏览器的全角标点挤压关掉之后，逐行完全一致。也就是说
+断行本身（UAX #14 断点、行尾宽度、缩进、两端对齐前的自然宽度）与 Chrome 一致；
+**唯一的差别是 Chrome 默认的 `text-spacing-trim` 会压缩成对的全角标点**（`。”`、
+`：“`、`——`、`……`），我们还没做。对话密集的文本里它每行多放 1–2 个字，页数
+可能差一页。这就是“标点挤压”的量化依据，也是 A/B 里剩下的那 3% 页数差。
+
+`--trim space-all` 这行依赖浏览器真的支持该属性：本机的 headless Chromium 145
+会解析却忽略它，Windows Chrome 则正确生效，脚本会在那种情况下打印 note。
 
 ## 滚动模式（M2）
 
@@ -212,7 +248,8 @@ Noto 路径，找不到则跳过（可用 `LAYX_CJK_FONT` / `LAYX_CJK_FONT_INDEX
 
 - 尚未实现：表格、ruby、竖排、flex/grid、RTL 视觉序、浮动环绕、脚注、链接命中透传。
 - 标点压缩 / 行末标点悬挂（`text-spacing-trim`）尚未实现；目前依赖字体自带的
-  全角标点宽度，行末标点会占满一个字宽。
+  全角标点宽度。这一项的影响已经量化（见上一节）：对话密集的中文文本里，Chrome
+  靠挤压成对标点每行多放 1–2 个字；把挤压关掉后两边逐行一致。
 - 两端对齐会把余量分给空格和 CJK 字间隙；标点相邻的间隙按半权重参与。
 - `keep-with-next`（标题不与正文分离）尚未实现，只有 `KeepTogether` 与
   `break-before/after`。
@@ -225,9 +262,12 @@ Noto 路径，找不到则跳过（可用 `LAYX_CJK_FONT` / `LAYX_CJK_FONT_INDEX
 - 当前不做 fixed-layout / 脚本化 EPUB；按设计应走 WebView fallback。
 - 与浏览器的差距，分三类：**已补齐** —— 边框/背景/圆角、下划线与删除线、
   `word-spacing`、合成粗体标记、可插拔断字（`render/hyphen/en` 内置 TeX
-  英文模式）；**能补没补** —— 标点挤压/悬挂、脚注；**不做（走回退）** ——
-  表格、flex/grid、竖排、ruby、transform、脚本；**有未知偏差** —— A/B 里总行数
-  比 Chrome 多 27%，原因未查清（可能是断行或字宽，不是分页）。
+  英文模式）；**能补没补** —— 标点挤压/悬挂（影响已量化，见 linecmp 一节）、脚注；
+  **不做（走回退）** —— 表格、flex/grid、竖排、ruby、transform、脚本。
+- 早先记的“A/B 里总行数比 Chrome 多 27%”是测量错误，已查清并修掉：语料里那段
+  纯英文用的是 Droid Sans Fallback，它没有拉丁字形，native 画 `.notdef`、浏览器
+  换字体，两边量的不是同一段文字。加上字体覆盖探测后同一份 A/B 的页数是 61 vs 63
+  （3%），剩下的差异就是上一条的标点挤压。断行本身逐行与 Chrome 一致。
 - 断字默认关闭。宿主需同时给 `LayoutOptions.Hyphenator`（例如
   `hyphenen.New()`）和块样式 `Style.Hyphenate: true`；两者都齐才会在词内加
   连字符，且只有整词放不下时才启用。

@@ -33,24 +33,26 @@
     'A paragraph of plain English follows, with some reasonably long words: extraordinary, misunderstanding, characteristically. It exists so the comparison also covers Latin shaping, justification and line breaking in a mixed document.',
   ];
 
-  function corpus(chars) {
+  function corpus(chars, source) {
     const out = [];
     let n = 0;
     for (let i = 0; n < chars; i++) {
-      const p = PARAS[i % PARAS.length];
+      const p = source[i % source.length];
       out.push(p);
       n += p.length + 1;
     }
     return out.join('\n').slice(0, chars);
   }
 
-  const text = corpus(CHARS);
-  const paragraphs = text.split('\n');
+  // The corpus is built after the font loads: it may only use characters the
+  // pinned face can draw (see fontCoverage below).
+  let text = '';
+  let paragraphs = [];
 
   // The pool and the single-instance baseline share these chapter boundaries.
   // Chapters are paginated independently, so their page counts must be
   // identical no matter which worker produced them.
-  const chapters = WORKERS > 0 ? LayxPool.splitChapters(text) : [];
+  let chapters = [];
 
   let fontBytes = null;
 
@@ -296,6 +298,56 @@
   await document.fonts.ready;
   const fontLoadMs = performance.now() - tFont;
 
+  // A face without Latin (Droid Sans Fallback is the usual pin here) draws
+  // .notdef boxes natively while the DOM substitutes another family for the
+  // same runes. The two sides then measure different text, and English
+  // paragraphs alone once made the native page count 27% higher for no layout
+  // reason. Keep only paragraphs every character of which the face covers,
+  // and publish the coverage so a run cannot be misread.
+  const coverage = fontCoverage();
+  const kept = PARAS.filter((p) => paragraphCovered(p, coverage));
+  text = corpus(CHARS, kept.length ? kept : PARAS);
+  paragraphs = text.split('\n');
+  chapters = WORKERS > 0 ? LayxPool.splitChapters(text) : [];
+
+  function fontCoverage() {
+    const cv = document.createElement('canvas');
+    cv.width = cv.height = 64;
+    const ctx = cv.getContext('2d', { willReadFrequently: true });
+    const hash = (fam, ch) => {
+      ctx.clearRect(0, 0, 64, 64);
+      ctx.fillStyle = '#000';
+      ctx.font = SIZE + 'px ' + fam;
+      ctx.fillText(ch, 4, 48);
+      const d = ctx.getImageData(0, 0, 64, 64).data;
+      let h = 2166136261;
+      for (let i = 3; i < d.length; i += 4) h = ((h ^ d[i]) * 16777619) >>> 0;
+      return h;
+    };
+    // A glyph the face lacks is substituted, so it draws differently from the
+    // same character requested from a family that does not exist at all.
+    const covers = (ch) => hash('book', ch) !== hash('zz-no-such-family', ch);
+    return {
+      latin: covers('A'),
+      digit: covers('9'),
+      cjk: covers('中'),
+      kana: covers('あ'),
+      punct: covers('。'),
+    };
+  }
+
+  // Which coverage classes a paragraph needs, mirroring the four PARAS.
+  function paragraphCovered(p, cov) {
+    const need = {
+      latin: /[A-Za-z]/.test(p),
+      digit: /[0-9]/.test(p),
+      cjk: /\p{Script=Han}/u.test(p),
+      kana: /[\p{Script=Hiragana}\p{Script=Katakana}]/u.test(p),
+      punct: /[\u3000-\u303f\uff00-\uffef]/.test(p),
+    };
+    return Object.keys(need).every((k) => !need[k] || cov[k]);
+  }
+
   const webview = runWebView();
   webview.fontLoadMs = round(fontLoadMs);
   const native = await runNative();
@@ -304,6 +356,8 @@
   const out = {
     params: { w: W, h: H, size: SIZE, lh: LH, chars: text.length, paragraphs: paragraphs.length, turns: TURNS, margin: MARGIN, workers: WORKERS, chapters: chapters.length },
     corpusChars: text.length,
+    fontCoverage: coverage,
+    corpusParagraphsDropped: PARAS.length - kept.length,
     webview,
     native,
     pool,
