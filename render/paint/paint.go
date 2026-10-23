@@ -103,6 +103,8 @@ type Font struct {
 	Family string
 	Data   []byte
 	Index  int
+	// Weight is the CSS-style numeric weight of this face (100..900).
+	Weight int
 }
 
 // Glyph is one positioned glyph.
@@ -128,6 +130,11 @@ type GlyphRun struct {
 	Color  Color
 	X, Y   float32
 	Glyphs []Glyph
+	// EmulateBold marks a run whose requested weight was >= 600 but whose
+	// matched face is not bold. The core never fakes a face; it only reports
+	// the condition so the host can embolden the glyphs (stroke, double draw,
+	// synthetic weight) or ignore it. It does not affect advances or layout.
+	EmulateBold bool
 }
 
 // Painter is the host drawing backend.

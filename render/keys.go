@@ -127,6 +127,14 @@ func chapterBreakKey(k *keyer, doc *Document, ch *Chapter, opts LayoutOptions, t
 		k.u32(uint32(st.FontSlant))
 		k.f32(st.FontSize)
 		k.f32(st.LetterSpacing)
+		k.f32(st.WordSpacing)
+		// Border widths shrink the content box (and the top/bottom widths add
+		// to the block height), so they are horizontal layout inputs. Border
+		// colors, backgrounds and corner radii are paint-only and absent.
+		k.f32(borderWidth(st.BorderTop))
+		k.f32(borderWidth(st.BorderRight))
+		k.f32(borderWidth(st.BorderBottom))
+		k.f32(borderWidth(st.BorderLeft))
 		k.u32(uint32(st.TextAlign))
 		k.f32(st.FirstLineIndent)
 		k.f32(st.MarginLeft)

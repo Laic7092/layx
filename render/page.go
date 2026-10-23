@@ -8,16 +8,18 @@ type drawOpKind uint8
 
 const (
 	opFill drawOpKind = iota
+	opRoundFill
 	opImage
 	opGlyphs
 )
 
 type drawOp struct {
-	kind  drawOpKind
-	rect  paint.Rect
-	color paint.Color
-	image paint.ImageID
-	run   paint.GlyphRun
+	kind   drawOpKind
+	rect   paint.Rect
+	color  paint.Color
+	radius float32
+	image  paint.ImageID
+	run    paint.GlyphRun
 }
 
 // Page is an immutable, cached page. Draw may be called concurrently as long
@@ -51,6 +53,8 @@ func (p *Page) Draw(painter paint.Painter) {
 		switch op.kind {
 		case opFill:
 			painter.FillRect(op.rect, op.color)
+		case opRoundFill:
+			painter.FillRoundRect(op.rect, op.radius, op.color)
 		case opImage:
 			painter.DrawImage(op.image, op.rect, paint.ImageOptions{})
 		case opGlyphs:
@@ -121,6 +125,10 @@ func (l *Layout) renderPage(n int) *Page {
 	}
 	dx := l.opts.Margins.Left
 	dy := l.opts.Margins.Top - info.top
+	p.ops = appendBoxOps(p.ops, cf.boxes, paint.Rect{
+		X: l.opts.Margins.Left, Y: l.opts.Margins.Top,
+		Width: contentWidth(l.opts), Height: contentHeight(l.opts),
+	}, dx, dy)
 	for i := info.first; i < info.last && i < len(cf.items); i++ {
 		it := &cf.items[i]
 		itemY := dy + it.y
@@ -138,6 +146,13 @@ func (l *Layout) renderPage(n int) *Page {
 				// buildLine returns baselines relative to the line box, so the
 				// line's own offset within the chapter flow has to be added.
 				runs[j].Y += dy + it.y
+			}
+			// Decorations are emitted before the line's glyphs, so they sit
+			// behind the ink at the same baseline.
+			for _, deco := range l.lineDecorations(w, it, info.chapter, runs) {
+				p.ops = append(p.ops, deco)
+			}
+			for j := range runs {
 				p.ops = append(p.ops, drawOp{kind: opGlyphs, run: runs[j]})
 			}
 			for si := range it.para.segs {
@@ -223,7 +238,7 @@ func (l *Layout) buildLine(w *textWorker, it *flowItem, chapter int) ([]paint.Gl
 	for i := range runs {
 		sr := &runs[i]
 		ref := sr.ref
-		color := sr.style.Color
+		color := sr.style.color
 		if color.Transparent() {
 			color = w.typo.Color
 		}
@@ -233,6 +248,10 @@ func (l *Layout) buildLine(w *textWorker, it *flowItem, chapter int) ([]paint.Gl
 			Color: color,
 			X:     pen,
 			Y:     it.baseline,
+			// Weight matching happened in FontSet.order / shapeRange; the
+			// core only flags that the matched face is not bold. Whether to
+			// synthesize a bold face is the host's decision.
+			EmulateBold: emulateBold(sr.style.fontWeight, ref),
 		}
 		run.Glyphs = make([]paint.Glyph, 0, len(sr.out.Glyphs))
 		for _, g := range sr.out.Glyphs {

@@ -75,7 +75,7 @@ func NewFontSet(faces ...FontFace) (*FontSet, error) {
 			return nil, fmt.Errorf("%w: face %d %q: %v", ErrInvalidOptions, i, face.Family, err)
 		}
 		fs.entries = append(fs.entries, fontEntry{
-			ref:   &paint.Font{Family: face.Family, Data: data, Index: face.Index},
+			ref:   &paint.Font{Family: face.Family, Data: data, Index: face.Index, Weight: weight},
 			font:  parsed,
 			index: weight<<8 | int(face.Slant),
 		})
@@ -135,4 +135,22 @@ func (fs *FontSet) order(family string, weight int, slant Slant) []int {
 		out[i] = all[i].idx
 	}
 	return out
+}
+
+// emulateBold reports whether a host should fake a bold face for a run.
+//
+// Font matching has already chosen the face carried by ref. When the requested
+// weight is bold (>= 600) but the matched face is not (its actual weight is
+// below 600), the core sets paint.GlyphRun.EmulateBold. It deliberately does
+// not alter advances or synthesize outlines: whether to embolden, and how, is
+// host policy.
+func emulateBold(requested int, ref *paint.Font) bool {
+	if requested < 600 {
+		return false
+	}
+	actual := 400
+	if ref != nil && ref.Weight > 0 {
+		actual = ref.Weight
+	}
+	return actual < 600
 }

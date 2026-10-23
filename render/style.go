@@ -23,6 +23,23 @@ const (
 	AlignJustify
 )
 
+// TextDecoration selects an optional decorative line drawn with the text.
+// It never affects layout.
+type TextDecoration uint8
+
+const (
+	TextDecorationNone TextDecoration = iota
+	TextDecorationUnderline
+	TextDecorationLineThrough
+)
+
+// Border is one edge of a block box. Width is in CSS pixels; zero means no
+// border. Transparent colors draw nothing.
+type Border struct {
+	Width float32
+	Color paint.Color
+}
+
 // Style is an already cascaded set of layout properties.
 //
 // Zero values mean "use the document default" for font family, size, line
@@ -37,8 +54,13 @@ type Style struct {
 	// LineHeight is a multiplier of FontSize. Zero uses Typography.LineHeight.
 	LineHeight    float32
 	LetterSpacing float32
-	Color         paint.Color
-	TextAlign     TextAlign
+	// WordSpacing adds to the advance of word-separating spaces (U+0020 and
+	// U+00A0), like CSS word-spacing. It affects line breaking.
+	WordSpacing         float32
+	Color               paint.Color
+	TextAlign           TextAlign
+	TextDecoration      TextDecoration
+	TextDecorationColor paint.Color
 	// FirstLineIndent shifts the first line of a paragraph.
 	FirstLineIndent float32
 
@@ -46,6 +68,18 @@ type Style struct {
 	MarginBottom float32
 	MarginLeft   float32
 	MarginRight  float32
+
+	// Border widths shrink the content box like padding; border colors are
+	// paint-only. BorderTop/Bottom also add to the block's vertical extent.
+	BorderTop    Border
+	BorderRight  Border
+	BorderBottom Border
+	BorderLeft   Border
+	// Background paints the block's border box behind its content. It is
+	// paint-only. CornerRadius rounds that background and is clamped at draw
+	// time; it has no effect on layout and no effect without a background.
+	Background   paint.Color
+	CornerRadius float32
 
 	BreakBefore bool
 	BreakAfter  bool

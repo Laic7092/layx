@@ -64,6 +64,9 @@ type chapterFlow struct {
 	chapter Chapter
 	items   []flowItem
 	paras   []*paragraph
+	// boxes are block border/background rectangles in chapter content
+	// coordinates. Unstyled documents leave this empty.
+	boxes []blockRect
 
 	placements []paraPlacement
 	nodePlace  map[NodeID]int32
@@ -299,7 +302,17 @@ func (e *Engine) layoutDoc(ctx context.Context, doc *Document, opts LayoutOption
 				if box == nil {
 					return nil, fmt.Errorf("%w: chapter %q produced no layout", ErrInvalidDocument, doc.chapters[plan.chapter].ID)
 				}
-				units = append(units, unitFromBox(box))
+				u := unitFromBox(box)
+				if tasks[ti].node < 0 {
+					// A top-level inline task is not a block of its own: its box
+					// is the chapter root. layChapter emits that root's border and
+					// background once around the whole flow, so the wrapper must
+					// not paint or re-apply root border offsets.
+					cp := *box
+					cp.style = Style{}
+					u.box = &cp
+				}
+				units = append(units, u)
 			}
 			bc := &breakChapter{key: breakKeys[plan.chapter], units: units}
 			breaks[plan.chapter] = bc
@@ -329,7 +342,7 @@ func (e *Engine) layoutDoc(ctx context.Context, doc *Document, opts LayoutOption
 		ch := &doc.chapters[ci]
 		root := &ch.Nodes[ch.Root]
 		rootStyle := resolveStyle(doc.style(root.Style), typo)
-		lc, err := e.layChapter(ctx, ch, ci, breaks[ci], rootStyle, typo, contentH)
+		lc, err := e.layChapter(ctx, ch, ci, breaks[ci], rootStyle, typo, contentH, contentWidth(opts))
 		if err != nil {
 			return nil, err
 		}
@@ -360,6 +373,7 @@ func (e *Engine) layoutDoc(ctx context.Context, doc *Document, opts LayoutOption
 			chapter:    *ch,
 			items:      lc.items,
 			paras:      lc.paras,
+			boxes:      lc.boxes,
 			placements: lc.placements,
 			nodePlace:  lc.nodePlace,
 			nodeFirst:  lc.nodeFirst,
@@ -392,19 +406,36 @@ func (e *Engine) layChapter(
 	rootStyle Style,
 	typo Typography,
 	contentH float32,
+	availW float32,
 ) (*laidChapter, error) {
-	items, paras, height := stackBreakUnits(bc.units, typo.ParagraphGap, typo)
-	xShift := rootStyle.MarginLeft
-	yShift := rootStyle.MarginTop
+	items, paras, height, boxes := stackBreakUnits(bc.units, typo.ParagraphGap, typo)
+	bt, _, bb, bl := borderWidths(rootStyle)
+	xShift := rootStyle.MarginLeft + bl
+	yShift := rootStyle.MarginTop + bt
 	for i := range items {
 		items[i].x += xShift
 		items[i].y += yShift
 	}
+	for i := range boxes {
+		boxes[i].x += xShift
+		boxes[i].y += yShift
+	}
+	if boxPaints(rootStyle) {
+		boxes = append(boxes, blockRect{
+			style:  rootStyle,
+			x:      rootStyle.MarginLeft,
+			y:      rootStyle.MarginTop,
+			width:  availW - rootStyle.MarginLeft - rootStyle.MarginRight,
+			height: bt + height + bb,
+		})
+	}
+	sortBlockRects(boxes)
 
 	place := bc.placementsFor(ch, ci, items, paras)
 	lc := &laidChapter{
 		items:      items,
 		paras:      paras,
+		boxes:      boxes,
 		height:     height + yShift + rootStyle.MarginBottom,
 		placements: place.placements,
 		nodePlace:  place.nodePlace,
@@ -451,7 +482,8 @@ func buildTasks(doc *Document, opts LayoutOptions, typo Typography, defaultLang 
 		nodes := ch.Nodes
 		root := &nodes[ch.Root]
 		rootStyle := resolveStyle(doc.style(root.Style), typo)
-		width := contentWidth(opts) - rootStyle.MarginLeft - rootStyle.MarginRight
+		_, rootRight, _, rootLeft := borderWidths(rootStyle)
+		width := contentWidth(opts) - rootStyle.MarginLeft - rootStyle.MarginRight - rootLeft - rootRight
 		if width <= 0 {
 			return nil, nil, fmt.Errorf("%w: chapter %q has non-positive content width", ErrInvalidOptions, ch.ID)
 		}
@@ -620,15 +652,15 @@ func countBreakUnits(units []breakUnit) (items, paras int) {
 // stackBreakUnits is the cache-friendly equivalent of flow.go's stackUnits.
 // The arithmetic matches stackUnits exactly so that a cached relayout and a
 // full layout produce identical line boxes and page boundaries.
-func stackBreakUnits(units []breakUnit, defaultGap float32, typo Typography) (items []flowItem, paras []*paragraph, height float32) {
+func stackBreakUnits(units []breakUnit, defaultGap float32, typo Typography) (items []flowItem, paras []*paragraph, height float32, boxes []blockRect) {
 	nItems, nParas := countBreakUnits(units)
 	items = make([]flowItem, 0, nItems)
 	paras = make([]*paragraph, 0, nParas)
-	height = appendBreakUnits(units, defaultGap, typo, &items, &paras)
-	return items, paras, height
+	height = appendBreakUnits(units, defaultGap, typo, &items, &paras, &boxes)
+	return items, paras, height, boxes
 }
 
-func appendBreakUnits(units []breakUnit, defaultGap float32, typo Typography, items *[]flowItem, paras *[]*paragraph) float32 {
+func appendBreakUnits(units []breakUnit, defaultGap float32, typo Typography, items *[]flowItem, paras *[]*paragraph, boxes *[]blockRect) float32 {
 	cursor := float32(0)
 	prevBottom := float32(0)
 	start := len(*items)
@@ -688,12 +720,27 @@ func appendBreakUnits(units []breakUnit, defaultGap float32, typo Typography, it
 			cursor += it.height
 		case breakBlockUnit:
 			mark := len(*items)
-			bh := appendBreakUnits(u.box.units, defaultGap, typo, items, paras)
+			markBoxes := len(*boxes)
+			bTop, bRight, bBottom, bLeft := borderWidths(u.box.style)
+			bh := appendBreakUnits(u.box.units, defaultGap, typo, items, paras, boxes)
 			for j := mark; j < len(*items); j++ {
 				(*items)[j].x += u.xOffset
-				(*items)[j].y += cursor
+				(*items)[j].y += cursor + bTop
 			}
-			cursor += bh
+			for j := markBoxes; j < len(*boxes); j++ {
+				(*boxes)[j].x += u.xOffset
+				(*boxes)[j].y += cursor + bTop
+			}
+			if boxPaints(u.box.style) {
+				*boxes = append(*boxes, blockRect{
+					style:  u.box.style,
+					x:      u.xOffset - bLeft,
+					y:      cursor,
+					width:  u.box.width + bLeft + bRight,
+					height: bTop + bh + bBottom,
+				})
+			}
+			cursor += bTop + bh + bBottom
 		}
 		if len(*items) > base {
 			if u.breakBefore {
@@ -734,14 +781,15 @@ func (bc *breakContext) block(nodes []Node, id NodeID, parentWidth float32, pare
 	}
 	n := &nodes[id]
 	st := inheritStyle(parentStyle, bc.doc.style(n.Style), bc.typo)
-	contentW := parentWidth - st.MarginLeft - st.MarginRight
+	_, br, _, bl := borderWidths(st)
+	contentW := parentWidth - st.MarginLeft - st.MarginRight - bl - br
 	if contentW <= 0 {
 		return nil, fmt.Errorf("%w: block %d has non-positive content width", ErrInvalidDocument, id)
 	}
 	box := &breakBox{
 		style:        st,
 		width:        contentW,
-		xOffset:      st.MarginLeft,
+		xOffset:      st.MarginLeft + bl,
 		marginTop:    st.MarginTop,
 		marginBottom: st.MarginBottom,
 		breakBefore:  st.BreakBefore,

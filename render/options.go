@@ -69,6 +69,9 @@ type Typography struct {
 	FontSize      float32
 	LineHeight    float32
 	LetterSpacing float32
+	// WordSpacing is added to word-separating spaces (U+0020 / U+00A0). Zero
+	// is the CSS initial value.
+	WordSpacing float32
 	// ParagraphGap is inserted between top-level block units when their own
 	// margins are zero.
 	ParagraphGap float32

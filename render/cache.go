@@ -35,6 +35,7 @@ type laidChapter struct {
 
 	items  []flowItem
 	paras  []*paragraph
+	boxes  []blockRect
 	height float32
 
 	placements []paraPlacement

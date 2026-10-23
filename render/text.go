@@ -112,9 +112,33 @@ func (m workerFontmap) ResolveFace(r rune) *font.Face {
 	return m.faces[0]
 }
 
+// runStyle is the compact subset of Style that shaping and drawing need per
+// run. Keeping a full Style here made every shapeRange slice element 48 bytes
+// larger once box/decoration fields were added, which showed up in the 5M-rune
+// layout allocation benchmark without changing any output.
+type runStyle struct {
+	letterSpacing   float32
+	wordSpacing     float32
+	fontWeight      int
+	color           paint.Color
+	decoration      TextDecoration
+	decorationColor paint.Color
+}
+
+func compactRunStyle(st Style) runStyle {
+	return runStyle{
+		letterSpacing:   st.LetterSpacing,
+		wordSpacing:     st.WordSpacing,
+		fontWeight:      st.FontWeight,
+		color:           st.Color,
+		decoration:      st.TextDecoration,
+		decorationColor: st.TextDecorationColor,
+	}
+}
+
 type shapedRun struct {
 	out   shaping.Output
-	style Style
+	style runStyle
 	ref   *paint.Font
 }
 
@@ -160,17 +184,47 @@ func (w *textWorker) shapeRange(p *paragraph, start, end int, defaultLang langua
 				w.shapes.Add(1)
 			}
 			shaped := w.shaper.Shape(split)
-			out = append(out, shapedRun{out: shaped, style: seg.style, ref: w.refs[faceIndex(w.faces, shaped.Face)]})
+			out = append(out, shapedRun{out: shaped, style: compactRunStyle(seg.style), ref: w.refs[faceIndex(w.faces, shaped.Face)]})
 		}
 	}
 	for i := range out {
-		ls := fixed.Int26_6(float32(out[i].style.LetterSpacing) * 64)
+		ls := fixed.Int26_6(out[i].style.letterSpacing * 64)
 		if ls != 0 {
 			out[i].out.AddLetterSpacing(ls, i == 0, i == len(out)-1)
 		}
 	}
+	w.addWordSpacing(p, out)
 	w.addAutospacing(p, out)
 	return out
+}
+
+// isWordSpace reports whether r is a word-separating space for word-spacing.
+// Only the two ASCII/Latin spaces are affected; the ideographic space U+3000
+// is a full-width glyph, not a word gap.
+func isWordSpace(r rune) bool {
+	return r == ' ' || r == '\u00a0'
+}
+
+// addWordSpacing widens word-separating spaces by Style.WordSpacing. It runs
+// before wrapping, so the extra advance participates in line breaking, and
+// the shaped output is reused by drawing.
+func (w *textWorker) addWordSpacing(p *paragraph, runs []shapedRun) {
+	for ri := range runs {
+		run := &runs[ri]
+		if run.style.wordSpacing == 0 {
+			continue
+		}
+		delta := fixed.Int26_6(float64(run.style.wordSpacing) * 64)
+		for gi := range run.out.Glyphs {
+			g := &run.out.Glyphs[gi]
+			idx := g.TextIndex()
+			if idx < 0 || idx >= len(p.text) || !isWordSpace(p.text[idx]) {
+				continue
+			}
+			g.Advance += delta
+			run.out.Advance += delta
+		}
+	}
 }
 
 // addAutospacing inserts a 1/8 em gap where an ideographic character meets a
@@ -185,8 +239,7 @@ func (w *textWorker) addAutospacing(p *paragraph, runs []shapedRun) {
 	var prev *shaping.Glyph
 	for ri := range runs {
 		run := &runs[ri]
-		size := fixed.Int26_6(float64(resolveFontSize(run.style, w.typo)) * 64)
-		delta := size / 8
+		delta := fixed.Int26_6(run.out.Size) / 8
 		for gi := range run.out.Glyphs {
 			g := &run.out.Glyphs[gi]
 			if prev != nil {

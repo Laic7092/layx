@@ -54,6 +54,8 @@ func (t *Tile) Draw(painter paint.Painter) {
 		switch op.kind {
 		case opFill:
 			painter.FillRect(op.rect, op.color)
+		case opRoundFill:
+			painter.FillRoundRect(op.rect, op.radius, op.color)
 		case opImage:
 			painter.DrawImage(op.image, op.rect, paint.ImageOptions{})
 		case opGlyphs:
@@ -204,6 +206,15 @@ func (l *Layout) buildTile(i int) *Tile {
 	ci := sort.Search(len(l.chapterTop), func(j int) bool {
 		return l.chapterTop[j]+l.chapters[j].height > top
 	})
+	// Boxes are painted first, behind every chapter's text in this tile.
+	tileClip := paint.Rect{X: 0, Y: 0, Width: l.opts.Viewport.Width, Height: l.tileHeight}
+	for bx := ci; bx < len(l.chapters); bx++ {
+		ct := l.chapterTop[bx]
+		if ct >= bottom {
+			break
+		}
+		t.ops = appendBoxOps(t.ops, l.chapters[bx].boxes, tileClip, l.opts.Margins.Left, ct-top)
+	}
 	w := l.pool.Get().(*textWorker)
 	defer l.pool.Put(w)
 
@@ -240,6 +251,11 @@ func (l *Layout) buildTile(i int) *Tile {
 					// run.Y is already the line baseline relative to the line
 					// box (as the paged display list expects).
 					runs[j].Y += itemTop - top
+				}
+				for _, deco := range l.lineDecorations(w, it, ci, runs) {
+					t.ops = append(t.ops, deco)
+				}
+				for j := range runs {
 					t.ops = append(t.ops, drawOp{kind: opGlyphs, run: runs[j]})
 				}
 				if it.para == nil {

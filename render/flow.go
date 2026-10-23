@@ -95,11 +95,22 @@ func inheritStyle(parent, child Style, typo Typography) Style {
 	if out.LetterSpacing == 0 {
 		out.LetterSpacing = parent.LetterSpacing
 	}
+	if out.WordSpacing == 0 {
+		out.WordSpacing = parent.WordSpacing
+	}
 	if out.Color.Transparent() {
 		out.Color = parent.Color
 	}
 	if out.TextAlign == AlignDefault {
 		out.TextAlign = parent.TextAlign
+	}
+	// text-decoration propagates in CSS: an ancestor's decoration paints over
+	// descendants and cannot be switched off below it.
+	if out.TextDecoration == TextDecorationNone {
+		out.TextDecoration = parent.TextDecoration
+	}
+	if out.TextDecorationColor.Transparent() {
+		out.TextDecorationColor = parent.TextDecorationColor
 	}
 	if out.FirstLineIndent == 0 {
 		out.FirstLineIndent = parent.FirstLineIndent
@@ -119,6 +130,9 @@ func inheritStyle(parent, child Style, typo Typography) Style {
 	}
 	if out.LetterSpacing == 0 {
 		out.LetterSpacing = typo.LetterSpacing
+	}
+	if out.WordSpacing == 0 {
+		out.WordSpacing = typo.WordSpacing
 	}
 	if out.Color.Transparent() {
 		out.Color = typo.Color
