@@ -7,9 +7,10 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
+	"strconv"
 	"strings"
 	"syscall/js"
 	"time"
@@ -97,13 +98,13 @@ type demo struct {
 	fonts     *render.FontSet
 	engine    *render.Engine
 
-	doc     *render.Document
-	layout  *render.Layout
-	page    int
-	pal     palette
-	selA    render.Location
-	selB    render.Location
-	hasSel  bool
+	doc      *render.Document
+	layout   *render.Layout
+	page     int
+	pal      palette
+	selA     render.Location
+	selB     render.Location
+	hasSel   bool
 	sections []section
 }
 
@@ -587,12 +588,12 @@ func boot(canvas, overlay js.Value, data js.Value, dpr float64) (any, error) {
 		overlayCtx: overlayCtx,
 		painter:    newCanvasPainter(ctx, face, index),
 		dpr:        dpr,
-		faces:     faces,
-		faceIndex: index,
-		family:    "book",
-		fonts:     fonts,
-		engine:    engine,
-		pal:       palettes[0],
+		faces:      faces,
+		faceIndex:  index,
+		family:     "book",
+		fonts:      fonts,
+		engine:     engine,
+		pal:        palettes[0],
 	}
 
 	return map[string]any{
@@ -620,12 +621,149 @@ func export(api js.Value, name string, fn func(args []js.Value) (any, error)) {
 	api.Set(name, f)
 }
 
+// reply serialises a control message for the JS side. It is deliberately hand
+// rolled: encoding/json drags in reflect and costs roughly 1.8 MB in the wasm
+// binary, which is a poor trade for the handful of small payloads exchanged
+// here (page counts, hit-test points, link URLs). Glyphs never cross this
+// boundary; painter.go talks to Canvas 2D directly.
 func reply(v any) string {
-	b, err := json.Marshal(v)
-	if err != nil {
+	var w jsonWriter
+	w.value(v)
+	if w.bad {
 		return `{"error":"encode failed"}`
 	}
-	return string(b)
+	return string(w.buf)
+}
+
+const hexDigits = "0123456789abcdef"
+
+type jsonWriter struct {
+	buf []byte
+	bad bool
+}
+
+func (w *jsonWriter) raw(s string) { w.buf = append(w.buf, s...) }
+
+func (w *jsonWriter) str(s string) {
+	w.buf = append(w.buf, '"')
+	for i := 0; i < len(s); i++ {
+		switch c := s[i]; c {
+		case '"', '\\':
+			w.buf = append(w.buf, '\\', c)
+		case '\n':
+			w.buf = append(w.buf, '\\', 'n')
+		case '\r':
+			w.buf = append(w.buf, '\\', 'r')
+		case '\t':
+			w.buf = append(w.buf, '\\', 't')
+		default:
+			if c < 0x20 {
+				w.buf = append(w.buf, '\\', 'u', '0', '0', hexDigits[c>>4], hexDigits[c&0xf])
+			} else {
+				w.buf = append(w.buf, c)
+			}
+		}
+	}
+	w.buf = append(w.buf, '"')
+}
+
+func (w *jsonWriter) integer(n int64) { w.buf = strconv.AppendInt(w.buf, n, 10) }
+
+func (w *jsonWriter) num(f float64) {
+	if math.IsNaN(f) || math.IsInf(f, 0) {
+		w.bad = true
+		w.raw("0")
+		return
+	}
+	w.buf = strconv.AppendFloat(w.buf, f, 'f', -1, 64)
+}
+
+func (w *jsonWriter) boolean(b bool) {
+	if b {
+		w.raw("true")
+		return
+	}
+	w.raw("false")
+}
+
+func (w *jsonWriter) value(v any) {
+	switch t := v.(type) {
+	case nil:
+		w.raw("null")
+	case string:
+		w.str(t)
+	case bool:
+		w.boolean(t)
+	case int:
+		w.integer(int64(t))
+	case int32:
+		w.integer(int64(t))
+	case uint16:
+		w.integer(int64(t))
+	case float64:
+		w.num(t)
+	case pointInfo:
+		w.raw(`{"node":`)
+		w.integer(int64(t.Node))
+		w.raw(`,"anchor":`)
+		w.integer(int64(t.Anchor))
+		w.raw(`,"offset":`)
+		w.integer(int64(t.Offset))
+		w.raw("}")
+	case layoutResult:
+		w.raw(`{"pages":`)
+		w.integer(int64(t.Pages))
+		w.raw(`,"ms":`)
+		w.num(t.MS)
+		w.raw(`,"sections":[`)
+		for i, s := range t.Sections {
+			if i > 0 {
+				w.raw(",")
+			}
+			w.raw(`{"anchor":`)
+			w.integer(int64(s.Anchor))
+			w.raw(`,"title":`)
+			w.str(s.Title)
+			w.raw(`,"page":`)
+			w.integer(int64(s.Page))
+			w.raw("}")
+		}
+		w.raw("]}")
+	case renderResult:
+		w.raw(`{"page":`)
+		w.integer(int64(t.Page))
+		w.raw(`,"pages":`)
+		w.integer(int64(t.Pages))
+		w.raw(`,"ms":`)
+		w.num(t.MS)
+		w.raw("}")
+	case selectionResult:
+		w.raw(`{"ok":`)
+		w.boolean(t.OK)
+		w.raw(`,"caret":`)
+		w.boolean(t.Caret)
+		w.raw(`,"a":`)
+		w.value(t.A)
+		w.raw(`,"b":`)
+		w.value(t.B)
+		w.raw("}")
+	case map[string]any:
+		w.raw("{")
+		first := true
+		for k, val := range t {
+			if !first {
+				w.raw(",")
+			}
+			first = false
+			w.str(k)
+			w.raw(":")
+			w.value(val)
+		}
+		w.raw("}")
+	default:
+		w.bad = true
+		w.raw("null")
+	}
 }
 
 func need(args []js.Value, n int) error {
