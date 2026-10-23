@@ -18,24 +18,25 @@ goroot="$(go env GOROOT)"
 cp "$goroot/lib/wasm/wasm_exec.js" "$out/wasm_exec.js"
 cp "$goroot/lib/wasm/wasm_exec_node.js" "$out/wasm_exec_node.js"
 
-# The demo mixes Chinese and Latin text, so prefer a CJK font. The last two
-# entries are Latin-only fallbacks: the demo still runs, but CJK renders as tofu.
+# The demo mixes Chinese and Latin text, so it needs a font with both. The
+# canvas path only reads outlines from the file, so a .ttc works fine here;
+# scripts/ab.sh pins a single-face .ttf instead because @font-face goes through
+# Chrome's OTS sanitizer, which rejects the WenQuanYi/Noto collections.
 font="${LAYX_FONT:-}"
 if [ -z "$font" ]; then
   for candidate in \
+    "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc" \
     "$HOME/.local/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc" \
     "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc" \
     "/usr/share/fonts/google-noto-cjk/NotoSansCJK-Regular.ttc" \
     "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc" \
     "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc" \
-    "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf" \
-    "/usr/share/fonts/truetype/fonts-japanese-gothic.ttf" \
-    "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc" \
-    "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc" \
-    "/usr/share/fonts/truetype/arphic/uming.ttc" \
     "/System/Library/Fonts/PingFang.ttc" \
     "/System/Library/Fonts/NotoSansCJK-Regular.ttc" \
     "C:/Windows/Fonts/msyh.ttc" \
+    "/usr/share/fonts/truetype/fonts-japanese-gothic.ttf" \
+    "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc" \
+    "/usr/share/fonts/truetype/arphic/uming.ttc" \
     "$root/render/testdata/DejaVuSerif.ttf" \
     "/usr/share/fonts/truetype/dejavu/DejaVuSerif.ttf"; do
     if [ -f "$candidate" ]; then

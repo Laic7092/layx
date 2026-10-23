@@ -63,6 +63,26 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# Both sides of the A/B must load the same bytes. The WebView side goes through
+# @font-face, and Chrome's OTS sanitizer rejects .ttc collections, so pin a
+# single-face .ttf here instead of letting build.sh pick the nicer-looking .ttc.
+if [ -z "${LAYX_FONT:-}" ]; then
+  for candidate in \
+    "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf" \
+    "$root/render/testdata/DejaVuSerif.ttf" \
+    "/usr/share/fonts/truetype/dejavu/DejaVuSerif.ttf"; do
+    if [ -f "$candidate" ]; then
+      export LAYX_FONT="$candidate"
+      break
+    fi
+  done
+  echo "==> ab: font ${LAYX_FONT:-<none>}"
+  echo "         @font-face needs a single-face TTF; the nicest CJK fonts on"
+  echo "         this box are .ttc. Droid Sans Fallback has CJK but no Latin, so"
+  echo "         Latin shows as tofu on both sides of the A/B. Timings are"
+  echo "         unaffected; set LAYX_FONT=<single-face ttf> to get readable text."
+fi
+
 ./examples/wasm/build.sh
 
 go build -o "$work/server" ./examples/wasm/server

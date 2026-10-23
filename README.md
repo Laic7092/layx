@@ -148,7 +148,14 @@ cat snapshots/index.md                   # 阶段元数据 + 图片 + 像素差�
 ./scripts/ab.sh m1 --chars 200000 --turns 100 --repeat 3
 ```
 
-输出表格并写 `snapshots/ab/m1.json`（gitignored）。覆盖：首页耗时、整书布局、
+输出表格并写 `snapshots/ab/m1.json`（gitignored）。
+
+两边的字体必须是同一份字节。WebView 侧走 `@font-face`，而 Chrome 的 OTS
+会拒绝 `.ttc` 字体集，所以 `build.sh` 给 demo 选 WenQuanYi/Noto 这类好看的
+`.ttc`，`ab.sh` 则固定一个单 face `.ttf`。本机唯一同时支持 CJK 的单 face
+TTF 是 Droid Sans Fallback，它没有拉丁字形，于是 A/B 页面里的英文会显示成
+方框——两侧一致，计时不受影响。想要可读的输出就用
+`LAYX_FONT=/path/to/single-face.ttf ./scripts/ab.sh ...`。覆盖：首页耗时、整书布局、
 冷/热翻页 p50/p99、字号重排、行高重分页、内存。尚未覆盖：应用冷启动、
 进程树 RSS、滚动掉帧、多线程 native（wasm 只有 GOMAXPROCS=1）。
 
