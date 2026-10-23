@@ -393,17 +393,77 @@ func (l *Layout) OffsetOf(loc Location) (float32, bool) {
 	if !ok || idx < 0 || idx >= len(cf.items) {
 		return 0, false
 	}
-	it := &cf.items[idx]
 	if l.opts.Mode == ModeScroll {
-		return l.chapterTop[loc.Chapter] + it.y, true
+		return l.contentYOfItem(cf, loc.Chapter, 0, cf.items[idx].y), true
 	}
 	page := cf.pageOfItem(idx)
 	if page < 0 || page >= len(cf.pages) {
 		return 0, false
 	}
+	return l.contentYOfItem(cf, loc.Chapter, page, cf.items[idx].y), true
+}
+
+// contentYOfItem maps a chapter content y to book content coordinates. page is
+// the item's chapter-local page index and is used by paged layouts only; in
+// scroll mode the chapters are simply stacked (see initScroll).
+//
+// This is the single definition of the paged content coordinates, shared by
+// OffsetOf, Selection and Progress so the three can never disagree.
+func (l *Layout) contentYOfItem(cf *chapterFlow, chapter, page int, y float32) float32 {
+	if l.opts.Mode == ModeScroll {
+		return l.chapterTop[chapter] + y
+	}
 	h := contentHeight(l.opts)
-	y := float32(cf.firstPage+page)*h + (it.y - cf.pages[page].top)
-	return y, true
+	return float32(cf.firstPage+page)*h + (y - cf.pages[page].top)
+}
+
+// Progress maps loc to a reading progress in [0,1] and reports whether the
+// location could be resolved. 0 is the start of the book and 1 its end.
+//
+// Progress is defined in both modes and is monotone in reading order: a
+// location that comes later in the document never reports a smaller value. It
+// is derived from the same content coordinates as OffsetOf (and thus from
+// Location and the document, never from a pixel scroll offset or from tile
+// geometry), so it does not move when the host scrolls and does not change when
+// TileHeight changes. Re-laying out with different typography re-derives it
+// from the new content coordinates, which is what "position stable, geometry
+// recomputed" means for a percentage.
+//
+//   - Paged mode: contentY / (PageCount * contentHeight), where contentHeight
+//     is the viewport height minus the top and bottom margins. This is the
+//     usual "page number plus position within the page", because paged content
+//     coordinates are page slots that include the page margins.
+//   - Scroll mode: contentY / ContentHeight, a position in the continuous
+//     stream that has no page margins in it.
+//
+// The two denominators measure different things, so the same Location may
+// report slightly different values in the two modes. Persist the Location, not
+// the percentage. A Location points at the top edge of its line box, so the
+// last line of a book reports a value slightly below 1; the result is clamped
+// to [0,1] regardless. Progress returns false when loc cannot be resolved or
+// when the layout has no extent to measure against.
+func (l *Layout) Progress(loc Location) (float32, bool) {
+	y, ok := l.OffsetOf(loc)
+	if !ok {
+		return 0, false
+	}
+	var total float32
+	if l.opts.Mode == ModeScroll {
+		total = l.contentHeight
+	} else {
+		total = float32(len(l.pages)) * contentHeight(l.opts)
+	}
+	if total <= 0 {
+		return 0, false
+	}
+	p := y / total
+	if p < 0 {
+		return 0, true
+	}
+	if p > 1 {
+		return 1, true
+	}
+	return p, true
 }
 
 // HitTest maps a content coordinate to a document location. It is available in

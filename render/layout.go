@@ -30,10 +30,27 @@ type Location struct {
 	Offset int
 }
 
-// SelectionQuad is one highlighted rectangle. Rect is in page coordinates.
+// SelectionQuad is one highlighted rectangle. Width and Height are the same
+// in both coordinate systems; only the origins differ.
 type SelectionQuad struct {
+	// Page is the global page index of the quad in paged mode. It is -1 in
+	// scroll mode, where PageCount is 0 and pages are not part of the output.
 	Page int
+	// Rect is in page coordinates: page margins included, relative to the
+	// top-left corner of Page. It is what a host paints on the page it got
+	// from Layout.Page, and it is only usable in paged mode.
 	Rect paint.Rect
+	// Content is the same rectangle in the book content coordinate system
+	// used by Layout.LocationAt, OffsetOf, HitTest and Tile.Top: x is measured
+	// from the left edge of the viewport (page Margins.Left included, matching
+	// the tile display lists) and y from the top of the book's body, across
+	// chapters. It is defined in both modes and is the only rectangle a
+	// scroll-mode host can use: the tile-local rectangle is Content shifted by
+	// -Tile.Top(). In paged mode Content.X equals Rect.X and Content.Y is the
+	// page slot top plus the in-page offset, i.e. the OffsetOf of the same
+	// location. Note that Layout.HitTest takes x without the left margin, so
+	// feed it Content.X - Margins.Left.
+	Content paint.Rect
 }
 
 // Link is a host link found on a page.
@@ -1232,6 +1249,69 @@ func (l *Layout) PageOf(loc Location) (int, bool) {
 	return cf.firstPage + k, true
 }
 
+// PageRange returns the global page range [first, first+count) that chapter
+// occupies, and whether that range is meaningful.
+//
+// Pages are numbered across the whole book (see Layout.Page), so first is the
+// page a host jumps to for the chapter and first+count-1 is its last page.
+// Every laid-out chapter covers at least one page: a chapter without flow items
+// still gets a blank page. Chapter c+1 starts at first+count, so the ranges
+// tile [0, PageCount) without gaps or overlaps.
+//
+// PageRange is paged-mode only. Scroll layouts have no pages (PageCount returns
+// 0), so they report ok=false; use ChapterContentTop for the chapter's start in
+// scroll content coordinates.
+func (l *Layout) PageRange(chapter int) (first, count int, ok bool) {
+	if l.opts.Mode == ModeScroll || chapter < 0 || chapter >= len(l.chapters) {
+		return 0, 0, false
+	}
+	cf := &l.chapters[chapter]
+	return cf.firstPage, len(cf.pages), true
+}
+
+// ChapterPages returns the first global page of every chapter in document
+// order, or nil in scroll mode, where pages are not part of the output.
+//
+// ChapterPages()[i] equals the first value of PageRange(i), so a host can build
+// a table of contents or a progress bar without walking pages itself.
+func (l *Layout) ChapterPages() []int {
+	if l.opts.Mode == ModeScroll {
+		return nil
+	}
+	out := make([]int, len(l.chapters))
+	for i := range l.chapters {
+		out[i] = l.chapters[i].firstPage
+	}
+	return out
+}
+
+// ChapterContentTop returns the content y where chapter starts, in the
+// coordinate system of LocationAt, OffsetOf and Progress.
+//
+// The value is the top of the chapter's own flow box: the chapter's root block
+// margin belongs to the chapter, so the first line box of a chapter with a root
+// MarginTop sits below this y. Chapter 0 starts at y=0 in both modes.
+//
+//   - Scroll mode: the chapter's position in the continuous stream.
+//   - Paged mode: the top of the chapter's first page slot, i.e.
+//     PageRange(chapter).first * contentHeight, where contentHeight is the
+//     viewport height minus the top and bottom margins. Paged content
+//     coordinates are page slots, so the value snaps to a page boundary.
+//
+// The method exists for both modes so a host can build a chapter list once and
+// resolve it to pages (paged) or to a scroll position (scroll). Consecutive
+// values, plus ContentHeight for the last chapter, give each chapter's extent
+// without a second accessor.
+func (l *Layout) ChapterContentTop(chapter int) (float32, bool) {
+	if chapter < 0 || chapter >= len(l.chapters) {
+		return 0, false
+	}
+	if l.opts.Mode == ModeScroll {
+		return l.chapterTop[chapter], true
+	}
+	return float32(l.chapters[chapter].firstPage) * contentHeight(l.opts), true
+}
+
 // resolveLocation fills Node from Anchor when the caller only has an anchor,
 // and rejects locations that do not belong to a laid-out node.
 func (l *Layout) resolveLocation(loc Location) (Location, bool) {
@@ -1291,8 +1371,13 @@ func (l *Layout) Relayout(ctx context.Context, opts LayoutOptions) (*Layout, err
 	return l.engine.layoutDoc(ctx, l.doc, opts, l.variants)
 }
 
-// Selection returns the page rectangles covering the rune range from..to.
+// Selection returns the rectangles covering the rune range from..to.
 // Cross-chapter selections are supported; locations are ordered by chapter.
+//
+// It is available in both modes. Paged hosts paint each quad on its Page using
+// Rect; scroll hosts use Content and subtract the tile top. In paged mode the
+// result is unchanged by the mode dimension: Page and Rect describe the same
+// pages as before, and Content is added alongside them.
 func (l *Layout) Selection(from, to Location) []SelectionQuad {
 	var ok bool
 	if from, ok = l.resolveLocation(from); !ok {
@@ -1334,18 +1419,30 @@ func (l *Layout) Selection(from, to Location) []SelectionQuad {
 		for i := first; i <= last; i++ {
 			it := &cf.items[i]
 			page := cf.pageOfItem(i)
-			if page < 0 {
+			if page < 0 || page >= len(cf.pages) {
 				continue
 			}
 			pi := &cf.pages[page]
+			pageNo := cf.firstPage + page
+			if l.opts.Mode == ModeScroll {
+				// Pages are not exposed in scroll mode; a page number would
+				// only be a stale implementation detail.
+				pageNo = -1
+			}
 			dx := l.opts.Margins.Left
 			dy := l.opts.Margins.Top + it.y - pi.top
+			cy := l.contentYOfItem(cf, ci, page, it.y)
+			emit := func(x, width, height float32) {
+				x += dx
+				out = append(out, SelectionQuad{
+					Page:    pageNo,
+					Rect:    paint.Rect{X: x, Y: dy, Width: width, Height: height},
+					Content: paint.Rect{X: x, Y: cy, Width: width, Height: height},
+				})
+			}
 			switch it.kind {
 			case itemImage:
-				out = append(out, SelectionQuad{
-					Page: cf.firstPage + page,
-					Rect: paint.Rect{X: dx + it.x, Y: dy, Width: it.width, Height: it.height},
-				})
+				emit(it.x, it.width, it.height)
 			case itemLine:
 				lo, hi := int(it.start), int(it.end)
 				if ci == from.Chapter && i == first {
@@ -1358,10 +1455,7 @@ func (l *Layout) Selection(from, to Location) []SelectionQuad {
 					continue
 				}
 				x0, x1 := l.lineRuneX(w, it, ci, lo, hi)
-				out = append(out, SelectionQuad{
-					Page: cf.firstPage + page,
-					Rect: paint.Rect{X: dx + it.x + x0, Y: dy, Width: x1 - x0, Height: it.height},
-				})
+				emit(it.x+x0, x1-x0, it.height)
 			}
 		}
 	}

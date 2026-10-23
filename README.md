@@ -116,6 +116,16 @@ Style{FontSize: 18, FirstLineIndent: 36, TextAlign: render.AlignJustify},
   `Location` / 矩形。
 - `Layout.LocationAt(y)` / `Layout.OffsetOf(loc)` 在分页与滚动两种模式下使用同一套
   内容坐标，并且互为逆运算。
+- 选区矩形 `SelectionQuad` 同时带两套坐标：`Rect` 是页内坐标（含页边距，叠加到
+  `Page` 上即可），`Page`/`Rect` 只在分页模式有意义；`Content` 是内容坐标，两种模式
+  都有定义。滚动模式下 `Page == -1`，宿主用 `Content` 减去 `Tile.Top()` 得到 tile 内坐标。
+- 章节 → 位置的映射：`Layout.PageRange(chapter)` 返回全局页区间 `[first, first+count)`，
+  `Layout.ChapterPages()` 返回每章首页，用来搭目录；滚动模式没有页，这两者返回
+  `ok=false` / `nil`，改用 `Layout.ChapterContentTop(chapter)`（章节在内容坐标里的起点）。
+- `Layout.Progress(loc)` → `[0,1]`：分页模式按「页 + 页内偏移」，滚动模式按
+  「内容 y / `ContentHeight`」。两者都由 `Location` 与内容坐标算出，不依赖像素滚动
+  或 tile 高度；但分母不同（分页含页边距），同一个 `Location` 的百分比在两种模式下
+  会有小差异——持久化请存 `Location`/锚点，不要存百分比。
 - 宿主负责把 `Location` 映射到 CFI、书签或数据库进度。
 
 ## 两种输出
@@ -156,6 +166,8 @@ layout.Tiles(lo, hi)   // 同步预取，不引入隐藏 goroutine
 - 分页模式：页面视口首尾相接成一条虚拟流，第 p 页覆盖 `[p*contentHeight, (p+1)*contentHeight)`。
 - 每行只属于一个 tile（按行盒顶边分配）；图片可跨 tile，由 Painter 裁剪。因此所有
   tile 的字形总数等于所有页的字形总数。
+- 选区与进度也用这套坐标：`Layout.Selection` 的 `SelectionQuad.Content` 减去
+  `Tile.Top()` 就是 tile 内矩形，`Layout.Progress` 则是内容 y 占 `ContentHeight` 的比例。
 
 ## 重排与缓存
 
@@ -248,6 +260,9 @@ go vet ./...
   transform、脚本。两者的区别是前者只需要新样式/分页规则，后者需要新的布局模型。
 - 断字默认关闭，需同时给 `LayoutOptions.Hyphenator`（如 `hyphenen.New()`）和块样式
   `Style.Hyphenate: true`；只有整词放不下时才在词内加连字符。
+- `Progress` 的两种模式分母不同（分页 = 页数 × 页内高，含页边距；滚动 = 连续流高度，
+  不含页边距），所以同一个位置在两种模式下的百分比不完全相同，且 `Location` 指向行盒
+  顶边、最后一行的进度略小于 1。跨模式比较进度请先统一模式，或直接用 `Location`。
 - 性能上：单核与 Blink 打平，多核快 3–5×，改行高快一个数量级；滚动/翻页的合成优势
   在宿主，核心只提供 tile DisplayList。
 
