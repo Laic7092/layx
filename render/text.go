@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"unicode"
 
 	"github.com/go-text/typesetting/di"
 	"github.com/go-text/typesetting/font"
@@ -145,7 +146,13 @@ func (w *textWorker) shapeRange(p *paragraph, start, end int, defaultLang langua
 		}
 		fm := workerFontmap{faces: w.faces, order: w.order(seg.style)}
 		for _, split := range w.segmenter.Split(in, fm) {
-			shaped := w.shaper.ShapeNoExtents(split)
+			// The wrapper's fit decision subtracts the last glyph's advance
+			// when its Width is zero (it assumes a whitespace glyph). With
+			// ShapeNoExtents every glyph has Width zero, so every line is
+			// under-measured by one glyph and justified lines overflow the
+			// right margin. Extents are therefore required here; drawing still
+			// uses the outlines directly.
+			shaped := w.shaper.Shape(split)
 			out = append(out, shapedRun{out: shaped, style: seg.style, ref: w.refs[faceIndex(w.faces, shaped.Face)]})
 		}
 	}
@@ -155,7 +162,81 @@ func (w *textWorker) shapeRange(p *paragraph, start, end int, defaultLang langua
 			out[i].out.AddLetterSpacing(ls, i == 0, i == len(out)-1)
 		}
 	}
+	w.addAutospacing(p, out)
 	return out
+}
+
+// addAutospacing inserts a 1/8 em gap where an ideographic character meets a
+// Latin letter or digit, mirroring CSS text-autospace. The gap is added to the
+// preceding glyph's advance so line wrapping sees the final width. Applied
+// before wrapping, so it also affects where lines break.
+func (w *textWorker) addAutospacing(p *paragraph, runs []shapedRun) {
+	if len(runs) == 0 {
+		return
+	}
+	var prevRun *shapedRun
+	var prev *shaping.Glyph
+	for ri := range runs {
+		run := &runs[ri]
+		size := fixed.Int26_6(float64(resolveFontSize(run.style, w.typo)) * 64)
+		delta := size / 8
+		for gi := range run.out.Glyphs {
+			g := &run.out.Glyphs[gi]
+			if prev != nil {
+				a, b := prev.TextIndex(), g.TextIndex()
+				if b == a+1 && needsAutospace(p.text, a, b) {
+					prev.Advance += delta
+					prevRun.out.Advance += delta
+				}
+			}
+			prev, prevRun = g, run
+		}
+	}
+}
+
+// needsAutospace reports whether the rune boundary a|b separates an ideographic
+// character from a Latin letter or digit.
+func needsAutospace(text []rune, a, b int) bool {
+	if a < 0 || b >= len(text) {
+		return false
+	}
+	left, right := text[a], text[b]
+	if isJustifySpace(left) || isJustifySpace(right) {
+		return false
+	}
+	return (isIdeographic(left) && isLatinish(right)) || (isLatinish(left) && isIdeographic(right))
+}
+
+// isIdeographic reports whether r is a CJK/Hangul ideograph or kana.
+func isIdeographic(r rune) bool {
+	return unicode.In(r, unicode.Han, unicode.Hiragana, unicode.Katakana, unicode.Hangul, unicode.Bopomofo)
+}
+
+// isLatinish reports whether r is a non-ideographic letter or digit, i.e. the
+// kind of character that gets an autospace gap next to CJK text.
+func isLatinish(r rune) bool {
+	if isIdeographic(r) {
+		return false
+	}
+	return unicode.IsLetter(r) || unicode.IsNumber(r)
+}
+
+// isCJKPunctuation reports whether r is CJK punctuation or a fullwidth form.
+// Gaps next to punctuation stretch less than gaps between ideographs.
+func isCJKPunctuation(r rune) bool {
+	switch {
+	case r >= 0x3000 && r <= 0x303f:
+		return true
+	case r >= 0xfe10 && r <= 0xfe19, r >= 0xfe30 && r <= 0xfe6f:
+		return true
+	case r >= 0xff00 && r <= 0xff65:
+		return true
+	}
+	switch r {
+	case '\u2014', '\u2026', '\u2018', '\u2019', '\u201c', '\u201d':
+		return true
+	}
+	return false
 }
 
 func faceIndex(faces []*font.Face, target *font.Face) int {

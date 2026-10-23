@@ -184,31 +184,38 @@ func buildLine(w *textWorker, it *flowItem) ([]paint.GlyphRun, []glyphPos) {
 	if it.align == AlignJustify && !it.last && it.avail > it.width {
 		extra = it.avail - it.width
 	}
-	spaceCount := 0
 	glyphCount := 0
 	for i := range runs {
-		for _, g := range runs[i].out.Glyphs {
-			glyphCount++
-			idx := g.TextIndex()
-			if idx >= 0 && idx < len(p.text) && isJustifySpace(p.text[idx]) {
-				spaceCount++
-			}
-		}
+		glyphCount += len(runs[i].out.Glyphs)
 	}
-	gapExtra := float32(0)
+
+	// Justification slack is shared by spaces and CJK inter-character gaps.
+	// Distributing it to spaces alone (the old behaviour) opens huge holes in
+	// mixed Chinese/Latin lines, which usually contain only a few spaces.
+	var weights []float32
+	factor := float32(0)
 	if extra > 0 && glyphCount > 1 {
-		gapExtra = extra / float32(glyphCount-1)
-	}
-	spaceExtra := float32(0)
-	if extra > 0 && spaceCount > 0 {
-		spaceExtra = extra / float32(spaceCount)
-		gapExtra = 0
+		weights = justifyWeights(p.text, runs)
+		total := float32(0)
+		for _, wgt := range weights {
+			total += wgt
+		}
+		if total > 0 {
+			factor = extra / total
+		} else {
+			// No stretchable slot (e.g. one long Latin word): fall back to
+			// spreading the slack over every interior gap.
+			for k := 0; k+1 < len(weights); k++ {
+				weights[k] = 1
+			}
+			factor = extra / float32(glyphCount-1)
+		}
 	}
 
 	pen := it.x
 	out := make([]paint.GlyphRun, 0, len(runs))
 	pos := make([]glyphPos, 0, glyphCount)
-	drawn := 0
+	k := 0
 	for i := range runs {
 		sr := &runs[i]
 		ref := sr.ref
@@ -235,23 +242,58 @@ func buildLine(w *textWorker, it *flowItem) ([]paint.GlyphRun, []glyphPos) {
 				Advance: adv,
 				Cluster: int32(idx - int(it.start)),
 			}
-			pos = append(pos, glyphPos{runeIndex: idx, x0: gx - it.x, x1: gx + adv - it.x})
 			pen += adv
-			drawn++
-			if extra > 0 {
-				if spaceExtra > 0 && idx >= 0 && idx < len(p.text) && isJustifySpace(p.text[idx]) {
-					pen += spaceExtra
-					glyph.Advance += spaceExtra
-				} else if gapExtra > 0 && drawn < glyphCount {
-					pen += gapExtra
-					glyph.Advance += gapExtra
-				}
+			if factor > 0 && k < len(weights) && weights[k] > 0 {
+				add := weights[k] * factor
+				pen += add
+				glyph.Advance += add
 			}
+			pos = append(pos, glyphPos{runeIndex: idx, x0: gx - it.x, x1: pen - it.x})
+			k++
 			run.Glyphs = append(run.Glyphs, glyph)
 		}
 		out = append(out, run)
 	}
 	return out, pos
+}
+
+// justifyWeights marks the glyphs that can absorb justification slack. A
+// weight sits on the glyph before the gap it widens: spaces take slack on
+// their own advance, and CJK inter-character gaps take slack at full weight.
+// Gaps touching punctuation get half weight, so fullwidth punctuation does
+// not turn into a hole.
+func justifyWeights(text []rune, runs []shapedRun) []float32 {
+	idx := make([]int, 0, 64)
+	for i := range runs {
+		for _, g := range runs[i].out.Glyphs {
+			idx = append(idx, g.TextIndex())
+		}
+	}
+	weights := make([]float32, len(idx))
+	for k, i := range idx {
+		if i >= 0 && i < len(text) && isJustifySpace(text[i]) {
+			weights[k] = 1
+		}
+	}
+	for k := 1; k < len(idx); k++ {
+		a, b := idx[k-1], idx[k]
+		if a < 0 || b != a+1 || a >= len(text) || b >= len(text) {
+			continue
+		}
+		ra, rb := text[a], text[b]
+		if isJustifySpace(ra) || isJustifySpace(rb) {
+			continue
+		}
+		if !isIdeographic(ra) && !isIdeographic(rb) {
+			continue
+		}
+		if isCJKPunctuation(ra) || isCJKPunctuation(rb) {
+			weights[k-1] += 0.5
+		} else {
+			weights[k-1] += 1
+		}
+	}
+	return weights
 }
 
 // lineRuneX maps a paragraph rune range to line-local x coordinates. Positions

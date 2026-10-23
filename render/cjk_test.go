@@ -14,6 +14,8 @@ var cjkCandidates = []string{
 	"/home/laix/.local/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
 	"/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
 	"/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+	"/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
+	"/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
 }
 
 func cjkFace(tb testing.TB) (FontFace, bool) {
@@ -31,6 +33,9 @@ func cjkFace(tb testing.TB) (FontFace, bool) {
 		return FontFace{}, false
 	}
 	index := 2
+	if strings.Contains(path, "wqy") || strings.Contains(path, "uming") {
+		index = 0
+	}
 	if v := os.Getenv("LAYX_CJK_FONT_INDEX"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
 			index = n
