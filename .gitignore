@@ -18,3 +18,7 @@ examples/wasm/web/fonts/
 
 # Rendering snapshots are build products (scripts/snapshot.sh)
 snapshots/
+
+# Real-book EPUB samples are not committed; copy them in to run the sample
+# tests (see epub/testdata/samples/README.md).
+epub/testdata/samples/*.epub

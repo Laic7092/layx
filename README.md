@@ -27,9 +27,13 @@ XHTML / 选择器 / 级联                ↓
 github.com/laix/layx/render        核心：IR、字体、布局、分页、命中、选区
 github.com/laix/layx/render/paint  绘制接口与基础类型（无光栅器）
 github.com/laix/layx/render/hyphen/en  可选：TeX 英文断字模式，核心不 import 它
+github.com/laix/layx/epub          EPUB/XHTML/CSS → render.Document（独立 module）
 examples/layout                    最小示例：排版并打印页数
 tools/                             开发工具：快照图合成、原生性能基线（不属于库）
 ```
+
+`epub/` 是 nested module，不在根 `go test ./...` 里；它把书编译成 `render.Document`，
+核心仍然不 import 它。
 
 直接依赖只有 `go-text/typesetting`（shaping / UAX #14 断行）和
 `golang.org/x/image/math/fixed`。`go list -deps ./render` 里会出现 `image/*`、
