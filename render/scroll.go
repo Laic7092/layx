@@ -3,6 +3,7 @@ package render
 import (
 	"math"
 	"sort"
+	"time"
 
 	"github.com/laix/layx/render/paint"
 )
@@ -189,6 +190,9 @@ func touchInt(order []int, v int) []int {
 }
 
 func (l *Layout) buildTile(i int) *Tile {
+	if l.engine.measure {
+		defer l.engine.noteTile(time.Now())
+	}
 	top := float32(i) * l.tileHeight
 	bottom := top + l.tileHeight
 	t := &Tile{layout: l, index: i, top: top, height: l.tileHeight}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/laix/layx/render/paint"
 )
@@ -120,6 +121,45 @@ func BenchmarkLayout5M(b *testing.B) {
 
 func BenchmarkLayout200K(b *testing.B) {
 	benchLayout(b, 200_000, 8)
+}
+
+// BenchmarkLayoutPhases reports the per-stage split of a cold 200K-rune layout.
+// Run it with -v to see the numbers; it is a diagnostic, not a competitive
+// measurement.
+func BenchmarkLayoutPhases(b *testing.B) {
+	doc, fs := cjkBenchDoc(b, 200_000)
+	e, err := New(Options{Workers: 1, Measure: true, PageCache: 4})
+	if err != nil {
+		b.Fatal(err)
+	}
+	opts := LayoutOptions{
+		Viewport: Viewport{Width: 600, Height: 900},
+		Typography: Typography{
+			FontFamily: "CJK", FontSize: 18, LineHeight: 1.6,
+			Color: paint.Color{A: 0xff},
+		},
+		Fonts: fs, Margins: paint.Insets{Top: 40, Right: 40, Bottom: 40, Left: 40},
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		l, err := e.Layout(context.Background(), doc, opts)
+		if err != nil {
+			b.Fatal(err)
+		}
+		if l.PageCount() == 0 {
+			b.Fatal("no pages")
+		}
+	}
+	b.StopTimer()
+	s := e.Stats()
+	n := time.Duration(s.Layouts)
+	if n <= 0 {
+		b.Fatal("no measured layouts")
+	}
+	b.Logf("per layout: total=%v keys=%v break=%v stack=%v paginate=%v assemble=%v shapes=%d pages=%d",
+		s.Total/n, s.Keys/n, s.Break/n, s.Stack/n, s.Paginate/n, s.Assemble/n,
+		s.Shapes/s.Layouts, s.Pages/s.Layouts)
 }
 
 // BenchmarkLayoutAnchors measures the cost of the anchor maps in break/page

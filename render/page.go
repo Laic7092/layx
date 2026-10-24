@@ -1,6 +1,8 @@
 package render
 
 import (
+	"time"
+
 	"github.com/laix/layx/render/paint"
 )
 
@@ -115,6 +117,9 @@ func (l *Layout) Page(n int) *Page {
 }
 
 func (l *Layout) renderPage(n int) *Page {
+	if l.engine.measure {
+		defer l.engine.notePage(time.Now())
+	}
 	info := &l.pages[n]
 	cf := &l.chapters[info.chapter]
 	w := l.pool.Get().(*textWorker)

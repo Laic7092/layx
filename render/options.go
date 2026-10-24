@@ -20,6 +20,10 @@ type Options struct {
 	// 0 uses 256. The cache is bounded, so it never grows with book size.
 	LineCache int
 	Limits    Limits
+	// Measure enables phase timing, reported by Engine.Stats. It is off by
+	// default so the layout path performs no clock reads; enabling it does not
+	// change layout results.
+	Measure bool
 }
 
 // Limits bounds the resources consumed by a single Layout call. A zero field
@@ -185,6 +189,9 @@ type Engine struct {
 	// shapes counts shaping calls. Layout variants that reuse cached line boxes
 	// must not increment it; tests use it to prove the cache works.
 	shapes atomic.Int64
+
+	measure bool
+	stats   statsCounters
 }
 
 // New creates an Engine.
@@ -226,6 +233,7 @@ func New(opts Options) (*Engine, error) {
 		tileCache: tileCache,
 		lineCache: lineCache,
 		limits:    opts.Limits.withDefaults(),
+		measure:   opts.Measure,
 	}, nil
 }
 

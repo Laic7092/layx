@@ -6,6 +6,7 @@ import (
 	"sort"
 	"sync"
 	"sync/atomic"
+	"time"
 	"unicode/utf8"
 
 	"github.com/go-text/typesetting/language"
@@ -167,6 +168,10 @@ func (e *Engine) layoutDoc(ctx context.Context, doc *Document, opts LayoutOption
 	if err != nil {
 		return nil, err
 	}
+	if e.measure {
+		e.stats.layouts.Add(1)
+		defer e.stop(time.Now(), &e.stats.total)
+	}
 	nch := len(doc.chapters)
 	if variants == nil {
 		variants = newVariantCache(nch)
@@ -186,6 +191,7 @@ func (e *Engine) layoutDoc(ctx context.Context, doc *Document, opts LayoutOption
 
 	// Pass 1: derive the three keys. Hashing walks the document but does no
 	// shaping, so it is cheap even for a 5M-rune book.
+	keyStart := e.mark()
 	keyer := variants.newKeyer()
 	contentH := contentHeight(opts)
 	breakKeys := make([]keyHash, nch)
@@ -204,9 +210,11 @@ func (e *Engine) layoutDoc(ctx context.Context, doc *Document, opts LayoutOption
 		return nil, err
 	}
 	currentPaintKey := paintKey(keyer, pageKeys, typo)
+	e.stop(keyStart, &e.stats.keys)
 
 	// Pass 2: find cached line boxes. Only chapters whose BreakKey is absent
 	// need shaping.
+	breakStart := e.mark()
 	breaks := make([]*breakChapter, nch)
 	needBreak := make([]bool, nch)
 	anyBreak := false
@@ -330,6 +338,7 @@ func (e *Engine) layoutDoc(ctx context.Context, doc *Document, opts LayoutOption
 			variants.putBreak(cacheKey{chapter: plan.chapter, fonts: opts.Fonts, key: breakKeys[plan.chapter]}, bc)
 		}
 	}
+	e.stop(breakStart, &e.stats.brk)
 
 	// Pass 3: reuse complete page maps when PageKey is unchanged, otherwise
 	// re-stack the cached line boxes and re-paginate.
@@ -361,6 +370,7 @@ func (e *Engine) layoutDoc(ctx context.Context, doc *Document, opts LayoutOption
 		variants.putPage(cacheKey{chapter: ci, fonts: opts.Fonts, key: pageKeys[ci]}, lc)
 	}
 
+	asmStart := e.mark()
 	l := &Layout{
 		engine:    e,
 		doc:       doc,
@@ -401,6 +411,7 @@ func (e *Engine) layoutDoc(ctx context.Context, doc *Document, opts LayoutOption
 		l.chapters[ci] = cf
 	}
 	l.initScroll()
+	e.stop(asmStart, &e.stats.assemble)
 	return l, nil
 }
 
@@ -416,6 +427,7 @@ func (e *Engine) layChapter(
 	contentH float32,
 	availW float32,
 ) (*laidChapter, error) {
+	stackStart := e.mark()
 	items, paras, height, boxes := stackBreakUnits(bc.units, typo.ParagraphGap, typo)
 	bt, _, bb, bl := borderWidths(rootStyle)
 	xShift := rootStyle.MarginLeft + bl
@@ -451,6 +463,8 @@ func (e *Engine) layChapter(
 		nodeAnchor: place.nodeAnchor,
 		anchors:    place.anchors,
 	}
+	e.stop(stackStart, &e.stats.stack)
+	pageStart := e.mark()
 	lc.pages = paginate(ctx, items, contentH, typo)
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -458,6 +472,7 @@ func (e *Engine) layChapter(
 	for pi := range lc.pages {
 		lc.pages[pi].chapter = ci
 	}
+	e.stop(pageStart, &e.stats.paginate)
 	return lc, nil
 }
 

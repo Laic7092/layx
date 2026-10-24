@@ -201,6 +201,21 @@ PaintKey = hash(PageKey, theme)
 颜色只进 `PaintKey`：换纸/换主题调用 `Layout.Relayout` 即可，`BreakKey`/`PageKey`
 会命中，只按需重建显示列表；不要为此重建 `Document`，那会丢掉三层缓存。
 
+## 分阶段计时
+
+```go
+eng, _ := render.New(render.Options{Measure: true})
+layout, _ := eng.Layout(ctx, doc, opts)
+s := eng.Stats() // Total / Keys / Break / Stack / Paginate / Assemble / Display
+```
+
+`Measure` 关闭时布局路径不读时钟。`Stats` 返回该 `Engine` 自上次 `ResetStats`
+以来的累计墙钟时间：`Total` 是整次 `Layout`，`Keys` 派生三层键，`Break` 断行
+（含 shaping 与并行调度），`Stack` 堆叠与位置映射，`Paginate` 分页，`Assemble`
+组装章节流与锚点。`Display` 是 `Page`/`Tile` 惰性构建显示列表的时间，独立累计，
+不在 `Total` 内；`Pages`/`Tiles` 是已构建的显示列表个数，`Shapes` 是 shaping 调用
+次数（始终计数，不受 `Measure` 影响）。
+
 ## 文本排版能力
 
 - 纯 Go shaping（`go-text` + HarfBuzz 移植），按 family/weight/slant/字形覆盖做 fallback。
