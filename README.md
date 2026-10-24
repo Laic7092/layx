@@ -114,8 +114,17 @@ Style{FontSize: 18, FirstLineIndent: 36, TextAlign: render.AlignJustify},
 ## 位置语义
 
 - `Location{Chapter, Node, Anchor, Offset}`：`Node`/`Offset` 用于当前 layout 内的
-  命中、选区、搜索；`Anchor` 是宿主可持久化的稳定锚点（无锚点时为 0）。
-- `Layout.Locate(anchor)` → `Location`，`Layout.PageOf(loc)` → 页码。
+  命中、选区、搜索；`Anchor` 是宿主可持久化的节点级锚点（无锚点时为 0）。
+  持久化请存 `Anchor` + `Offset`；解析时 `Anchor` 非零优先于 `Node`，所以换书重建
+  `Document` 后旧 node 号不会盖掉稳定锚点。`Node.Anchor` 会被 builder 并入
+  `Chapter.Anchors`。锚点请按块/段/标题铺，不要按 inline span 铺：成本是 O(#anchors)。
+- `Layout.Locate(anchor)` → `Location`（`Offset` 为 0，锚点只到节点），
+  `Layout.PageOf(loc)` → 页码；`Layout.LocationOfPage(page)` 是它的反向。
+- `Layout.Document()` 返回本次 layout 的文档，指针身份可判断索引/图片缓存是否过期。
+- `Layout.Margins()` / `Layout.PageContentHeight()` 给出页边距和页内容高，宿主不必再反推。
+- `Document.Text(chapter)` 按阅读序拼接该章文本，并返回每个节点的 rune 区间
+  （非文本节点为零宽 run）；搜索和复制不必自己遍历 `NodeText`。它不插入段落分隔符，
+  需要换行时按 run 的 `Node.Kind` 自己加。
 - `Page.HitTest(x, y)`、`Layout.HitTest(x, y)`、`Layout.Selection(from, to)` 返回同一套
   `Location` / 矩形。
 - `Layout.LocationAt(y)` / `Layout.OffsetOf(loc)` 在分页与滚动两种模式下使用同一套
@@ -189,6 +198,8 @@ PaintKey = hash(PageKey, theme)
 - `Options.LineCache`（默认 256）缓存未做两端对齐的 shaped 行，命中不增加 `Engine.shapes`。
 
 `rules`（`Typography.Rules`）作为整体进 key：新增一个政策字段会自动参与哈希。
+颜色只进 `PaintKey`：换纸/换主题调用 `Layout.Relayout` 即可，`BreakKey`/`PageKey`
+会命中，只按需重建显示列表；不要为此重建 `Document`，那会丢掉三层缓存。
 
 ## 文本排版能力
 
@@ -308,6 +319,11 @@ go vet ./...
   逗号/句号不压缩，因为 Chromium 在这套字体上也没压它们。悬挂只在关闭断字时生效。
 - `Typography.Rules` 的零值按规范初始值处理（`Widows`/`Orphans` 为 2/2）。想要"填满
   页面、不做孤寡行保护"写 `1`。
+- `Style` 的零值是"继承"，所以 `FirstLineIndent: 0`、`LetterSpacing: 0`、
+  `Hyphenate: false` 这类"显式取消继承"的写法目前无法表达；按已级联的样式构建，并只在
+  确实想继承的字段留零。
+- 锚点是节点级、不是 rune 级；跨书版本的稳定性由宿主的 `AnchorID` 保证，引擎只保证同一个
+  `Document` 内映射不变。
 - `examples/wasm` 的阅读器界面在改字号/行高时仍直接调 `Engine.Layout`，每次都是冷布局；
   benchmark 路径（`examples/wasm/bench.go`）已经改走 `Relayout`，所以性能数字反映引擎
   能力，而 demo 的手感比引擎实际能做到的差。

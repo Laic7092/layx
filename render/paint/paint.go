@@ -88,6 +88,12 @@ type Affine struct {
 func Identity() Affine { return Affine{A: 1, D: 1} }
 
 // ImageID is an opaque image handle assigned by the host.
+//
+// The engine only passes it back to Painters. It is scoped to the host's
+// resource table, not to a Layout: if a Document is rebuilt with different
+// images, a Painter must invalidate caches keyed by ImageID unless the host
+// preserves the same mapping. Layout.Document() is a convenient generation
+// key.
 type ImageID uint32
 
 // ImageOptions carries optional image drawing hints. It is a struct (not a

@@ -43,8 +43,13 @@ type Border struct {
 // Style is an already cascaded set of layout properties.
 //
 // Zero values mean "use the document default" for font family, size, line
-// height, color and weight. Margins and indentation are absolute CSS pixels;
-// zero means zero.
+// height, color and weight. Margins are absolute CSS pixels; zero means zero.
+//
+// Inherited typographic fields treat zero (or the zero enum, or false) as
+// "unset". That makes an explicit reset inexpressible: a child cannot cancel a
+// parent's FirstLineIndent, LetterSpacing, WordSpacing, Hyphenate, FontSlant or
+// TextDecoration with a zero value. Build styles from a fully cascaded tree and
+// leave zero only where inheritance is intended.
 type Style struct {
 	FontFamily string
 	FontWeight int

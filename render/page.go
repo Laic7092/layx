@@ -42,6 +42,11 @@ func (p *Page) Size() paint.Size {
 }
 
 // Draw replays the page display list into painter.
+//
+// Draw is pure replay: it does not lay out, shape, allocate or depend on a
+// previous Draw. The same Page may be drawn repeatedly, in any order, from any
+// number of painters; a host that animates a turn can draw old and new pages
+// into one painter with different transforms.
 func (p *Page) Draw(painter paint.Painter) {
 	if painter == nil {
 		return

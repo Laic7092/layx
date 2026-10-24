@@ -15,13 +15,18 @@ import (
 // Location identifies a position inside a laid-out document.
 //
 // Node and Offset are valid for the lifetime of a Layout and are what hit
-// testing, selection and search use. Anchor is the host anchor associated with
-// Node (or NoAnchor) and is stable across relayouts; it is the value a host
-// should persist and map back to its own CFI/bookmark representation.
+// testing, selection and search use. Anchor is a host-owned node identifier
+// (or NoAnchor); persist Anchor and Offset together, because an anchor names a
+// node and Offset names a rune inside it.
+//
+// When Anchor is non-zero, PageOf, Selection, Progress and OffsetOf resolve the
+// location by the anchor and ignore Node. That is what lets a stable anchor
+// survive a rebuilt Document whose node ids moved. An unknown anchor makes
+// resolution fail rather than falling back to a possibly stale Node.
 //
 // Locations returned by Locate and HitTest always have both Node and Anchor
 // filled in. When constructing a location from a persisted anchor alone, set
-// Node to InvalidNode: PageOf and Selection will resolve the anchor for you.
+// Node to InvalidNode for clarity; resolution does not depend on it.
 type Location struct {
 	Chapter int
 	Node    NodeID
@@ -1212,7 +1217,22 @@ func (l *Layout) Typography() Typography { return l.opts.Typography }
 // Viewport returns the viewport of this layout.
 func (l *Layout) Viewport() Viewport { return l.opts.Viewport }
 
-// Locate resolves a host anchor to a location.
+// Document returns the document this layout was built from. Relayout variants
+// share the same pointer, so a host can use pointer identity to reject a stale
+// search index or clear an image cache.
+func (l *Layout) Document() *Document { return l.doc }
+
+// Margins returns the page margins used by this layout.
+func (l *Layout) Margins() paint.Insets { return l.opts.Margins }
+
+// PageContentHeight returns the page viewport height after the top and bottom
+// margins, i.e. Viewport.Height - Margins.Top - Margins.Bottom. It is the
+// height of one page slot in paged mode and the inset height in scroll mode.
+func (l *Layout) PageContentHeight() float32 { return contentHeight(l.opts) }
+
+// Locate resolves a host anchor to the node it names. Offset is 0 because an
+// anchor is node-level; set Location.Offset from a persisted position to
+// address a rune inside the node. An anchor of NoAnchor is never found.
 func (l *Layout) Locate(anchor AnchorID) (Location, bool) {
 	pos, ok := l.anchors[anchor]
 	if !ok {
@@ -1227,11 +1247,11 @@ func (l *Layout) PageOf(loc Location) (int, bool) {
 	if l.opts.Mode == ModeScroll {
 		return 0, false
 	}
-	if loc.Chapter < 0 || loc.Chapter >= len(l.chapters) {
-		return 0, false
-	}
 	loc, ok := l.resolveLocation(loc)
 	if !ok {
+		return 0, false
+	}
+	if loc.Chapter < 0 || loc.Chapter >= len(l.chapters) {
 		return 0, false
 	}
 	cf := &l.chapters[loc.Chapter]
@@ -1247,6 +1267,21 @@ func (l *Layout) PageOf(loc Location) (int, bool) {
 		return 0, false
 	}
 	return cf.firstPage + k, true
+}
+
+// LocationOfPage returns the location of the first flow item on page. It is
+// the inverse of PageOf: PageOf(LocationOfPage(p)) == p for every non-blank
+// page. Scroll layouts and blank pages report false.
+func (l *Layout) LocationOfPage(page int) (Location, bool) {
+	if l.opts.Mode == ModeScroll || page < 0 || page >= len(l.pages) {
+		return Location{}, false
+	}
+	info := &l.pages[page]
+	cf := &l.chapters[info.chapter]
+	if info.first < 0 || info.first >= info.last || info.first >= len(cf.items) {
+		return Location{}, false
+	}
+	return l.locationAtItem(cf, info.chapter, info.first)
 }
 
 // PageRange returns the global page range [first, first+count) that chapter
@@ -1312,25 +1347,27 @@ func (l *Layout) ChapterContentTop(chapter int) (float32, bool) {
 	return float32(l.chapters[chapter].firstPage) * contentHeight(l.opts), true
 }
 
-// resolveLocation fills Node from Anchor when the caller only has an anchor,
-// and rejects locations that do not belong to a laid-out node.
+// resolveLocation resolves a location to a laid-out node. A non-zero anchor is
+// authoritative: it is the only identifier that stays meaningful after the
+// document is rebuilt. Node is a fast path for locations without anchors.
 func (l *Layout) resolveLocation(loc Location) (Location, bool) {
+	if loc.Anchor != NoAnchor {
+		pos, ok := l.anchors[loc.Anchor]
+		if !ok {
+			return Location{}, false
+		}
+		loc.Chapter = pos.chapter
+		loc.Node = pos.node
+		// Keep loc.Offset: an anchor names the node, the caller may add a rune
+		// position inside it.
+		return loc, true
+	}
 	if loc.Chapter >= 0 && loc.Chapter < len(l.chapters) {
 		if _, known := l.chapters[loc.Chapter].nodeFirst[loc.Node]; known && loc.Node != InvalidNode {
 			return loc, true
 		}
 	}
-	if loc.Anchor == NoAnchor {
-		return Location{}, false
-	}
-	pos, ok := l.anchors[loc.Anchor]
-	if !ok {
-		return Location{}, false
-	}
-	loc.Chapter = pos.chapter
-	loc.Node = pos.node
-	loc.Offset = pos.offset
-	return loc, true
+	return Location{}, false
 }
 
 func (cf *chapterFlow) itemOf(loc Location) (int, bool) {

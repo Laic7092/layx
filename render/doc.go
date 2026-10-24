@@ -11,6 +11,8 @@ package render
 import (
 	"errors"
 	"fmt"
+	"strings"
+	"unicode/utf8"
 
 	"github.com/laix/layx/render/paint"
 )
@@ -24,8 +26,12 @@ const InvalidNode NodeID = -1
 // StyleID identifies an entry in Document.Styles.
 type StyleID uint32
 
-// AnchorID is a host-owned identifier that can be resolved back to a node and
-// a rune offset. Zero means "no anchor".
+// AnchorID is a host-owned identifier for a node. Zero means "no anchor".
+//
+// An anchor identifies a node, not a rune position: persist Location.Offset
+// alongside it. The engine only guarantees that an anchor maps to the same node
+// within one Document; stability across a rebuilt Document is the host's
+// responsibility (reuse the same ID for the same source position).
 type AnchorID uint32
 
 // NoAnchor is the zero AnchorID.
@@ -65,6 +71,11 @@ type Node struct {
 	// in CSS pixels. Height may be zero if the host knows only one dimension.
 	Width  float32
 	Height float32
+	// Anchor is a convenience for the common one-anchor-per-node case. The
+	// builder merges it into Chapter.Anchors; a conflicting or duplicate ID is
+	// rejected. Anchor blocks, paragraphs or headings rather than every inline
+	// node: each anchor costs one map entry in the Document and in every Layout
+	// variant built from it.
 	Anchor AnchorID
 	// Lang is an optional BCP 47 tag for this node. It overrides the document
 	// language for shaping.
@@ -79,7 +90,12 @@ type Chapter struct {
 	Root  NodeID
 	Nodes []Node
 	// Anchors maps host anchors to nodes. Offsets within a node are carried by
-	// Location.Offset, not by this table.
+	// Location.Offset, not by this table. Node.Anchor is merged into this map
+	// by the builder.
+	//
+	// Anchor blocks, paragraphs or headings rather than every inline node: each
+	// anchor costs one map entry in the Document and in every Layout variant,
+	// so the cost is O(#anchors), not O(#nodes).
 	Anchors map[AnchorID]NodeID
 }
 
@@ -123,6 +139,75 @@ func (d *Document) Chapter(i int) (Chapter, bool) {
 		return Chapter{}, false
 	}
 	return d.chapters[i], true
+}
+
+// TextRun records where one reachable node sits in Document.Text's string.
+//
+// RuneStart and RuneEnd are rune offsets in Text's returned string. For a
+// NodeText they delimit its text; for every other node they are equal, so a
+// Location on an image or an empty block still maps to a position. Rune
+// offsets are int32 because Limits.MaxTextRunes is far below their range.
+type TextRun struct {
+	Node               NodeID
+	RuneStart, RuneEnd int32
+}
+
+// Text returns one chapter's text and the rune range of every reachable node.
+//
+// Nodes are visited in reading order from Chapter.Root and their text nodes
+// are concatenated with no synthetic separators: block, inline, image and
+// break nodes are zero-width runs. The returned string and slice are newly
+// allocated; a host that searches or copies on every keystroke should cache
+// them. Text is O(chapter text + nodes) and is never called by Layout.
+func (d *Document) Text(chapter int) (string, []TextRun, bool) {
+	ch, ok := d.Chapter(chapter)
+	if !ok {
+		return "", nil, false
+	}
+
+	// Size the string and the run slice in a first pass over reachable nodes,
+	// so the builder below never reallocates what may be megabytes of text.
+	var byteSize, nodes int
+	stack := []NodeID{ch.Root}
+	for len(stack) > 0 {
+		id := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		if id < 0 || int(id) >= len(ch.Nodes) {
+			continue
+		}
+		nodes++
+		n := &ch.Nodes[id]
+		if n.Kind == NodeText && n.Text != "" {
+			byteSize += len(n.Text)
+		}
+		for i := len(n.Children) - 1; i >= 0; i-- {
+			stack = append(stack, n.Children[i])
+		}
+	}
+
+	var b strings.Builder
+	b.Grow(byteSize)
+	runs := make([]TextRun, 0, nodes)
+	var offset int32
+	stack = append(stack[:0], ch.Root)
+	for len(stack) > 0 {
+		id := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		if id < 0 || int(id) >= len(ch.Nodes) {
+			continue
+		}
+		n := &ch.Nodes[id]
+		start := offset
+		if n.Kind == NodeText && n.Text != "" {
+			offset += int32(utf8.RuneCountInString(n.Text))
+			b.WriteString(n.Text)
+		}
+		runs = append(runs, TextRun{Node: id, RuneStart: start, RuneEnd: offset})
+		for i := len(n.Children) - 1; i >= 0; i-- {
+			stack = append(stack, n.Children[i])
+		}
+	}
+	return b.String(), runs, true
 }
 
 // Metadata returns document metadata.
@@ -176,8 +261,11 @@ func (b *DocumentBuilder) AddChapter(ch Chapter) error {
 	if _, exists := b.ids[ch.ID]; exists {
 		return fmt.Errorf("%w: duplicate chapter id %q", ErrInvalidDocument, ch.ID)
 	}
-	b.ids[ch.ID] = struct{}{}
 	cp := cloneChapter(ch)
+	if err := mergeNodeAnchors(&cp); err != nil {
+		return err
+	}
+	b.ids[ch.ID] = struct{}{}
 	b.chapters = append(b.chapters, cp)
 	return nil
 }
@@ -213,6 +301,27 @@ func cloneChapter(ch Chapter) Chapter {
 		}
 	}
 	return cp
+}
+
+// mergeNodeAnchors folds Node.Anchor into Chapter.Anchors. A node may carry one
+// anchor as a convenience; the map remains the single source of truth so
+// placement, validation and Locate see the same table.
+func mergeNodeAnchors(ch *Chapter) error {
+	for i := range ch.Nodes {
+		id := ch.Nodes[i].Anchor
+		if id == NoAnchor {
+			continue
+		}
+		if ch.Anchors == nil {
+			ch.Anchors = make(map[AnchorID]NodeID)
+		}
+		if existing, ok := ch.Anchors[id]; ok && existing != NodeID(i) {
+			return fmt.Errorf("%w: chapter %q anchor %d points at both node %d and node %d",
+				ErrInvalidDocument, ch.ID, id, existing, i)
+		}
+		ch.Anchors[id] = NodeID(i)
+	}
+	return nil
 }
 
 const (

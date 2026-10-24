@@ -381,11 +381,11 @@ func (l *Layout) LocationAt(y float32) (Location, bool) {
 // The y is the top edge of the box, not the baseline, so
 // LocationAt(OffsetOf(loc)) resolves back to the same line.
 func (l *Layout) OffsetOf(loc Location) (float32, bool) {
-	if loc.Chapter < 0 || loc.Chapter >= len(l.chapters) {
-		return 0, false
-	}
 	loc, ok := l.resolveLocation(loc)
 	if !ok {
+		return 0, false
+	}
+	if loc.Chapter < 0 || loc.Chapter >= len(l.chapters) {
 		return 0, false
 	}
 	cf := &l.chapters[loc.Chapter]

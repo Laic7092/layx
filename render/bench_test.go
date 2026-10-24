@@ -2,12 +2,21 @@ package render
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/laix/layx/render/paint"
 )
 
 func cjkBenchDoc(b *testing.B, totalRunes int) (*Document, *FontSet) {
+	b.Helper()
+	return cjkBenchDocAnchors(b, totalRunes, 0)
+}
+
+// cjkBenchDocAnchors builds the 5M-style corpus with anchors spread over the
+// paragraph blocks. Multiple anchors may point at one block; this measures the
+// anchor maps themselves without changing the text or line count.
+func cjkBenchDocAnchors(b *testing.B, totalRunes, anchors int) (*Document, *FontSet) {
 	b.Helper()
 	face, ok := cjkFace(b)
 	if !ok {
@@ -47,8 +56,24 @@ func cjkBenchDoc(b *testing.B, totalRunes int) (*Document, *FontSet) {
 			Color: paint.Color{A: 0xff}, MarginBottom: 8,
 		},
 	}
+	var anchorMap map[AnchorID]NodeID
+	if anchors > 0 {
+		anchorMap = make(map[AnchorID]NodeID, anchors)
+		per := anchors / blocks
+		if per < 1 {
+			per = 1
+		}
+		id := AnchorID(1)
+		for i := 0; i < blocks && len(anchorMap) < anchors; i++ {
+			node := NodeID(2*i + 1)
+			for j := 0; j < per && len(anchorMap) < anchors; j++ {
+				anchorMap[id] = node
+				id++
+			}
+		}
+	}
 	builder := NewDocumentBuilder().SetStyles(styles).SetMetadata(Metadata{Language: "zh-CN", Reflowable: true})
-	if err := builder.AddChapter(Chapter{ID: "long", Root: 0, Nodes: nodes}); err != nil {
+	if err := builder.AddChapter(Chapter{ID: "long", Root: 0, Nodes: nodes, Anchors: anchorMap}); err != nil {
 		b.Fatal(err)
 	}
 	doc, err := builder.Build()
@@ -95,6 +120,60 @@ func BenchmarkLayout5M(b *testing.B) {
 
 func BenchmarkLayout200K(b *testing.B) {
 	benchLayout(b, 200_000, 8)
+}
+
+// BenchmarkLayoutAnchors measures the cost of the anchor maps in break/page
+// placement. Anchors are attached to paragraph blocks, the granularity the
+// API recommends; 1M anchors is the "anchor every node" pathological case.
+func BenchmarkLayoutAnchors(b *testing.B) {
+	for _, anchors := range []int{0, 10_000, 100_000, 1_000_000} {
+		b.Run(fmt.Sprintf("anchors=%d", anchors), func(b *testing.B) {
+			doc, fs := cjkBenchDocAnchors(b, 5_000_000, anchors)
+			e, err := New(Options{Workers: 8, PageCache: 2})
+			if err != nil {
+				b.Fatal(err)
+			}
+			opts := LayoutOptions{
+				Viewport: Viewport{Width: 600, Height: 900},
+				Typography: Typography{
+					FontFamily: "CJK", FontSize: 18, LineHeight: 1.6,
+					Color: paint.Color{A: 0xff},
+				},
+				Fonts: fs, Margins: paint.Insets{Top: 40, Right: 40, Bottom: 40, Left: 40},
+			}
+			b.SetBytes(5_000_000)
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				l, err := e.Layout(context.Background(), doc, opts)
+				if err != nil {
+					b.Fatal(err)
+				}
+				if l.PageCount() == 0 {
+					b.Fatal("no pages")
+				}
+			}
+		})
+	}
+}
+
+// BenchmarkDocumentText measures the on-demand text projection. It is not part
+// of Layout; the allocation per iteration is the chapter string plus one
+// TextRun per reachable node, which a search or copy host is expected to cache.
+func BenchmarkDocumentText(b *testing.B) {
+	for _, runes := range []int{200_000, 5_000_000} {
+		b.Run(fmt.Sprintf("runes=%d", runes), func(b *testing.B) {
+			doc, _ := cjkBenchDoc(b, runes)
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				text, runs, ok := doc.Text(0)
+				if !ok || len(text) == 0 || len(runs) == 0 {
+					b.Fatal("Text returned no chapter")
+				}
+			}
+		})
+	}
 }
 
 func BenchmarkRelayoutGap200K(b *testing.B) {
