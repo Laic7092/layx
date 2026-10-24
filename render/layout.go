@@ -228,12 +228,7 @@ func (e *Engine) layoutDoc(ctx context.Context, doc *Document, opts LayoutOption
 		}
 	}
 
-	pool := &sync.Pool{New: func() any {
-		w := newTextWorker(opts.Fonts, typo, opts.Hyphenator)
-		w.defaultLang = defaultLang
-		w.shapes = &e.shapes
-		return w
-	}}
+	pool := e.newWorkerPool(opts, doc)
 
 	if anyBreak {
 		explicit := make([]map[NodeID]float32, nch)
@@ -1421,6 +1416,57 @@ func (cf *chapterFlow) itemOf(loc Location) (int, bool) {
 // modified. Line boxes and page maps are reused when their keys are unchanged.
 func (l *Layout) Relayout(ctx context.Context, opts LayoutOptions) (*Layout, error) {
 	return l.engine.layoutDoc(ctx, l.doc, opts, l.variants)
+}
+
+// WithColors returns the same layout printed in another paper: ink on
+// background, with link text in link. The three are paint-only — they never
+// reach BreakKey or PageKey — so no line is shaped and no page moves; the pages
+// and tiles already drawn are forgotten and the next Draw paints them again.
+//
+// It is the theme switch: it costs a copy of the layout, not a pass over the
+// book. The result shares the receiver's flow, pages, anchors and variant cache,
+// so a later Relayout of the recoloured layout reuses them too.
+func (l *Layout) WithColors(ink, background, link paint.Color) *Layout {
+	opts := l.opts
+	opts.Typography.Color = ink
+	opts.Typography.Background = background
+	opts.Typography.LinkColor = link
+	opts.Typography = opts.Typography.withDefaults()
+
+	n := &Layout{
+		engine:    l.engine,
+		doc:       l.doc,
+		opts:      opts,
+		chapters:  l.chapters,
+		pages:     l.pages,
+		anchors:   l.anchors,
+		variants:  l.variants,
+		breakKeys: l.breakKeys,
+		pageKeys:  l.pageKeys,
+		paintKey:  paintKey(l.variants.newKeyer(), l.pageKeys, opts.Typography),
+		pool:      l.engine.newWorkerPool(opts, l.doc),
+		lineCache: newLineCache(l.engine.lineCache),
+		cache:     make(map[int]*Page),
+	}
+	n.chapterTop, n.contentHeight = l.chapterTop, l.contentHeight
+	n.tileHeight, n.tileCount = l.tileHeight, l.tileCount
+	if opts.Mode == ModeScroll {
+		n.tileCache = make(map[int]*Tile)
+	}
+	return n
+}
+
+// newWorkerPool builds the workers a layout draws with. They carry its
+// typography, which is why a recoloured layout builds its own.
+func (e *Engine) newWorkerPool(opts LayoutOptions, doc *Document) *sync.Pool {
+	typo := opts.Typography
+	lang := language.NewLanguage(doc.meta.Language)
+	return &sync.Pool{New: func() any {
+		w := newTextWorker(opts.Fonts, typo, opts.Hyphenator)
+		w.defaultLang = lang
+		w.shapes = &e.shapes
+		return w
+	}}
 }
 
 // Selection returns the rectangles covering the rune range from..to.

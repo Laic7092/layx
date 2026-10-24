@@ -192,3 +192,111 @@ func TestScrollTilesRepaintLinkColour(t *testing.T) {
 		t.Fatalf("relaid tile did not repaint links")
 	}
 }
+
+// TestWithColorsRepaintsTheSameLayout covers the theme switch itself: another
+// paper keeps the document, every page and every line, and only the pages drawn
+// afterwards are painted again — no shaping, no new keys.
+func TestWithColorsRepaintsTheSameLayout(t *testing.T) {
+	doc := linkDoc(t)
+	e := mustEngine(t, 2)
+	first := layoutWith(t, e, doc, linkOptions(t, testInk, testLink))
+	if got := runColors(t, first); !hasColor(got, testInk) || !hasColor(got, testLink) {
+		t.Fatalf("first layout drew %v, want ink %v and link %v", got, testInk, testLink)
+	}
+
+	shaped := e.shapes.Load()
+	paper := paint.Color{R: 0x4a, G: 0x4a, B: 0x4d, A: 0xff}
+	second := first.WithColors(testInk2, paper, testLink2)
+	if got := e.shapes.Load() - shaped; got != 0 {
+		t.Fatalf("a theme change shaped %d runs, want 0", got)
+	}
+	if second.Document() != doc || second.PageCount() != first.PageCount() {
+		t.Fatal("a theme change moved the book")
+	}
+	if second.breakKeys[0] != first.breakKeys[0] || second.pageKeys[0] != first.pageKeys[0] {
+		t.Fatal("a theme change derived new layout keys")
+	}
+	if second.paintKey == first.paintKey {
+		t.Fatal("PaintKey did not change for a theme change")
+	}
+	if got, want := second.Typography().Color, testInk2; got != want {
+		t.Fatalf("recoloured ink = %v, want %v", got, want)
+	}
+	got := runColors(t, second)
+	if !hasColor(got, testInk2) || !hasColor(got, testLink2) {
+		t.Fatalf("recoloured layout drew %v, want ink %v and link %v", got, testInk2, testLink2)
+	}
+	if hasColor(got, testInk) || hasColor(got, testLink) {
+		t.Fatalf("recoloured layout kept the old colours: %v", got)
+	}
+	// The layout the host replaced still prints in its own colours.
+	if got := runColors(t, first); !hasColor(got, testInk) {
+		t.Fatalf("the old layout was recoloured too: %v", got)
+	}
+}
+
+// TestWithColorsRepaintsScrollTiles is the same for the scrolling column, whose
+// tiles are cached against the layout as well.
+func TestWithColorsRepaintsScrollTiles(t *testing.T) {
+	doc := linkDoc(t)
+	e := mustEngine(t, 2)
+	opts := linkOptions(t, testInk, testLink)
+	opts.Mode = ModeScroll
+	first := layoutWith(t, e, doc, opts)
+	second := first.WithColors(testInk2, first.Typography().Background, testLink2)
+
+	tileColors := func(l *Layout) []paint.Color {
+		tile := l.Tile(0)
+		if tile == nil {
+			t.Fatal("no tile 0")
+		}
+		rec := &capturePainter{}
+		tile.Draw(rec)
+		var out []paint.Color
+		for _, run := range rec.runs {
+			out = append(out, run.Color)
+		}
+		return out
+	}
+	if got := tileColors(second); !hasColor(got, testLink2) {
+		t.Fatalf("recoloured tile drew %v, want link %v", got, testLink2)
+	}
+	if got := tileColors(first); !hasColor(got, testLink) {
+		t.Fatalf("the old tile was recoloured too: %v", got)
+	}
+	if second.ContentHeight() != first.ContentHeight() || second.TileCount() != first.TileCount() {
+		t.Fatal("a theme change moved the column")
+	}
+}
+
+// BenchmarkWithColors5M is the theme-switch target: unlike Relayout it does not
+// walk the book at all, so the cost must not follow the book's size.
+func BenchmarkWithColors5M(b *testing.B) {
+	doc, fs := cjkBenchDoc(b, 5_000_000)
+	e, err := New(Options{Workers: 8})
+	if err != nil {
+		b.Fatal(err)
+	}
+	l, err := e.Layout(context.Background(), doc, LayoutOptions{
+		Viewport: Viewport{Width: 600, Height: 900},
+		Typography: Typography{
+			FontFamily: "CJK", FontSize: 18, LineHeight: 1.6,
+			Color: paint.Color{A: 0xff},
+		},
+		Fonts: fs, Margins: paint.Insets{Top: 40, Right: 40, Bottom: 40, Left: 40},
+	})
+	if err != nil {
+		b.Fatal(err)
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		ink := testInk
+		if i%2 == 0 {
+			ink = testInk2
+		}
+		if next := l.WithColors(ink, testInk, testLink); next.PageCount() == 0 {
+			b.Fatal("no pages")
+		}
+	}
+}
