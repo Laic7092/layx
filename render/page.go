@@ -53,10 +53,14 @@ func (p *Page) Draw(painter paint.Painter) {
 	if painter == nil {
 		return
 	}
+	visible, cull := visibleRect(painter)
 	painter.Save()
 	painter.ClipRect(paint.Rect{X: 0, Y: 0, Width: p.Size().Width, Height: p.Size().Height})
 	for i := range p.ops {
 		op := &p.ops[i]
+		if cull && !replayOp(op, visible) {
+			continue
+		}
 		switch op.kind {
 		case opFill:
 			painter.FillRect(op.rect, op.color)
@@ -163,7 +167,11 @@ func (l *Layout) renderPage(n int) *Page {
 				p.ops = append(p.ops, deco)
 			}
 			for j := range runs {
-				p.ops = append(p.ops, drawOp{kind: opGlyphs, run: runs[j]})
+				p.ops = append(p.ops, drawOp{
+					kind: opGlyphs,
+					rect: glyphOpRect(dx+it.x, itemY, it.width, it.height),
+					run:  runs[j],
+				})
 			}
 			for si := range it.para.segs {
 				seg := &it.para.segs[si]

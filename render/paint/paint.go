@@ -165,3 +165,16 @@ type Painter interface {
 	DrawImage(id ImageID, dst Rect, opts ImageOptions)
 	DrawGlyphs(run GlyphRun)
 }
+
+// Clipped is an optional extension implemented by a Painter that knows which
+// part of its current user space can affect the output.
+//
+// Page.Draw and Tile.Draw use it to skip display-list ops whose rectangles do
+// not intersect Visible. This is pure replay culling: it does not shape, lay
+// out or rasterize, and a Painter that does not implement Clipped receives
+// every op. Visible is reported in the same coordinate space as the ops (that
+// is, with the painter's current transform already accounted for), and an
+// empty Rect means nothing is visible.
+type Clipped interface {
+	Visible() Rect
+}

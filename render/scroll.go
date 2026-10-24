@@ -48,10 +48,14 @@ func (t *Tile) Draw(painter paint.Painter) {
 	if painter == nil {
 		return
 	}
+	visible, cull := visibleRect(painter)
 	painter.Save()
 	painter.ClipRect(paint.Rect{X: 0, Y: 0, Width: t.Size().Width, Height: t.Size().Height})
 	for i := range t.ops {
 		op := &t.ops[i]
+		if cull && !replayOp(op, visible) {
+			continue
+		}
 		switch op.kind {
 		case opFill:
 			painter.FillRect(op.rect, op.color)
@@ -120,6 +124,17 @@ func (l *Layout) TileCount() int {
 		return 0
 	}
 	return l.tileCount
+}
+
+// TileHeight returns the tile height this layout was built with. A zero
+// TileHeight option means "use the viewport height", and that resolved value
+// is what this returns; hosts need it to map a scroll offset to a tile index
+// without remembering the option they passed in.
+func (l *Layout) TileHeight() float32 {
+	if l.opts.Mode != ModeScroll {
+		return 0
+	}
+	return l.tileHeight
 }
 
 // Tile returns tile i, building its DisplayList on first access. Tiles are
@@ -260,7 +275,11 @@ func (l *Layout) buildTile(i int) *Tile {
 					t.ops = append(t.ops, deco)
 				}
 				for j := range runs {
-					t.ops = append(t.ops, drawOp{kind: opGlyphs, run: runs[j]})
+					t.ops = append(t.ops, drawOp{
+						kind: opGlyphs,
+						rect: glyphOpRect(l.opts.Margins.Left+it.x, itemTop-top, it.width, it.height),
+						run:  runs[j],
+					})
 				}
 				if it.para == nil {
 					continue

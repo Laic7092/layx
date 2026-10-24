@@ -6,6 +6,10 @@
 //
 // A Document, FontSet and Layout are immutable after construction except for
 // internal caches. They are safe for concurrent use once built.
+//
+// A host Painter may optionally implement paint.Clipped; Page.Draw and
+// Tile.Draw then skip display-list ops outside its visible region. This is
+// replay-only culling: it does not lay out, shape or rasterize.
 package render
 
 import (

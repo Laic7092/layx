@@ -1,6 +1,6 @@
 # layx
 
-纯 Go 的 reflowable 文档排版 / 渲染内核。输入是宿主已经解析、级联好的 `render.Document`，
+纯 Go 的 reflowable 排版内核（产出显示列表）。输入是宿主已经解析、级联好的 `render.Document`，
 输出是分页结果、`DisplayList` 和命中/选区/锚点映射。**不解析 EPUB/XHTML/CSS，不内置光栅器。**
 
 ```text
@@ -170,6 +170,11 @@ layout.Tiles(lo, hi)   // 同步预取，不引入隐藏 goroutine
 ```
 
 **tile 是 DisplayList，不是位图**：`render` 没有光栅器，是否把 tile 缓存成图片由宿主决定。
+
+宿主画家可以实现可选的 `paint.Clipped`（`Visible() paint.Rect`）：`Page.Draw` 与
+`Tile.Draw` 会跳过与可见区不相交的 op，字形 op 各自带行盒矩形。不实现该接口的画家
+仍然收到全部 op，回放语义不变；`Visible` 在 op 所在的坐标系里报告，空矩形表示什么都
+不可见。
 
 内容坐标：
 
