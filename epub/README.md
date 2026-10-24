@@ -20,7 +20,9 @@ module github.com/laix/layx/epub
 - 章内锚点：`id` 属性和 `<a name>` 映射到导航/链接目标的锚点，供
   `Layout.Locate` 跳转；目标元素不存在时回退到章首，不留死行
 - 链接样式：UA 样式表给 `a` 上 `Options.LinkColor` 的颜色和下划线（默认浏览器蓝），
-  斜体/粗体仍从外层继承；作者 CSS 的 `a { color: …; text-decoration: none }` 可以覆盖
+  斜体/粗体仍从外层继承；作者 CSS 的 `a { color: …; text-decoration: none }` 可以覆盖。
+  `Options.ThemeLinks` 则只留下划线、不写颜色，链接色由
+  `render.Typography.LinkColor` 绘制，换主题不用重建文档
 - 链接：`<a href>` 变成第一个可见节点的 `render.Node.Link`，外部 URL 原样
   保留，书内目标解析成归档路径 + fragment，可用 `Book.ResolveLink` 变成
   `(Chapter, render.AnchorID)`；`render` 的 `Page.Links()` 已经带命中矩形
@@ -145,6 +147,8 @@ module github.com/laix/layx/epub
 宿主开关（`Options`）：
 
 - `LinkColor`：UA 里 `a` 的颜色与下划线颜色；作者 CSS 可覆盖。
+- `ThemeLinks`：不把链接色写进文档，交给 `render.Typography.LinkColor`；
+  阅读器自己的纸色变了只重绘、不重建文档。
 - `RuleColor`：`<hr>` 和没写颜色的边框；默认中性灰。
 - `IgnoreColor`：丢掉作者声明的 `color`，让主题决定墨色；UA 的链接色不受影响。
 - `ContainerWidth`：解析 `%` 长度的栏宽。

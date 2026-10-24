@@ -656,3 +656,58 @@ func TestLinkStyle(t *testing.T) {
 		})
 	}
 }
+
+// ThemeLinks keeps the reader's link colour out of the document: the sheet
+// underlines links but names no colour, so render.Typography.LinkColor paints
+// them and a theme change repaints instead of rebuilding the book.
+func TestThemeLinksLeavesColourToReader(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "link.epub")
+	writeEPUB(t, file, map[string][]byte{
+		"META-INF/container.xml": []byte(`<?xml version="1.0"?><container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>`),
+		"OEBPS/content.opf":      []byte(`<?xml version="1.0"?><package xmlns="http://www.idpf.org/2007/opf" version="3.0"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>链接</dc:title><dc:language>zh</dc:language></metadata><manifest><item id="ch1" href="ch1.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="ch1"/></spine></package>`),
+		"OEBPS/ch1.xhtml":        []byte(`<html><body><p>正文 <a href="https://example.com">链接</a> 正文</p></body></html>`),
+	})
+	b, err := Open(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A host colour is irrelevant when the reader paints links.
+	doc, _, err := b.BuildWith(18, Options{ThemeLinks: true, LinkColor: paint.Color{R: 1, G: 2, B: 3, A: 0xff}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ch, ok := doc.Chapter(0)
+	if !ok {
+		t.Fatal("no chapter")
+	}
+	styles := doc.Styles()
+	linkLeaf := render.InvalidNode
+	for i, n := range ch.Nodes {
+		if n.Link != "" {
+			linkLeaf = render.NodeID(i)
+			break
+		}
+	}
+	if linkLeaf == render.InvalidNode {
+		t.Fatal("no node carries the link")
+	}
+	var styled bool
+	for _, n := range ch.Nodes {
+		for _, child := range n.Children {
+			if child != linkLeaf {
+				continue
+			}
+			st := styles[n.Style]
+			if !st.Color.Transparent() {
+				t.Errorf("link colour = %+v, want unresolved so the reader paints it", st.Color)
+			}
+			if st.TextDecoration != render.TextDecorationUnderline {
+				t.Errorf("link decoration = %v, want underline", st.TextDecoration)
+			}
+			styled = true
+		}
+	}
+	if !styled {
+		t.Error("link text has no styled ancestor")
+	}
+}

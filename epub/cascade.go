@@ -885,7 +885,7 @@ tr { margin-bottom: 0.3em; break-inside: avoid }
 dt { font-weight: bold }
 dd { margin-left: 2em; margin-bottom: 0.3em }
 pre { white-space: pre }
-a { color: %s; text-decoration: underline }
+%s
 hr { margin: 0.8em 0; border: 0; border-bottom: 1px solid %s }
 `
 
@@ -893,7 +893,16 @@ hr { margin: 0.8em 0; border: 0; border-bottom: 1px solid %s }
 // the package free of init-time state and lets the base size and host colours
 // in.
 func uaRules(base float32, link, rule paint.Color) []cssRule {
-	sheet := parseCSS(fmt.Sprintf(uaCSS, base, cssColor(link), cssColor(rule)))
+	// A transparent link colour is the reader's: the sheet still underlines
+	// links but names no colour, which render.Typography.LinkColor supplies.
+	// That keeps the reader's link colour out of the document, so switching
+	// between a light and a dark theme repaints links instead of rebuilding
+	// the book.
+	linkRule := "a { text-decoration: underline }"
+	if !link.Transparent() {
+		linkRule = fmt.Sprintf("a { color: %s; text-decoration: underline }", cssColor(link))
+	}
+	sheet := parseCSS(fmt.Sprintf(uaCSS, base, linkRule, cssColor(rule)))
 	rules := make([]cssRule, 0, len(sheet.parts))
 	for _, part := range sheet.parts {
 		if part.importHref == "" {

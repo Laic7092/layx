@@ -15,7 +15,7 @@ import (
 
 // DefaultLinkColor is the colour of an in-book or external link when the host
 // does not choose one: the blue browsers and reading apps give links.
-var DefaultLinkColor = paint.Color{R: 0x1a, G: 0x5f, B: 0xc4, A: 0xff}
+var DefaultLinkColor = render.DefaultLinkColor
 
 // Options are the choices a host makes when it turns a book into a document.
 type Options struct {
@@ -23,6 +23,14 @@ type Options struct {
 	// A transparent or zero colour uses DefaultLinkColor. Author CSS can
 	// override it.
 	LinkColor paint.Color
+
+	// ThemeLinks leaves link text in the reader's colour: the user-agent sheet
+	// underlines links but names no colour, so render.Typography.LinkColor
+	// paints them. A reader that changes its paper repaints links without
+	// rebuilding the document, which is why a reader with themes wants this.
+	// LinkColor is then unused, and author CSS that names a link colour still
+	// wins.
+	ThemeLinks bool
 
 	// RuleColor paints rules and borders that name no colour of their own,
 	// such as an <hr> in a book whose CSS never mentions it. A transparent
@@ -41,6 +49,9 @@ type Options struct {
 }
 
 func (o Options) linkColor() paint.Color {
+	if o.ThemeLinks {
+		return paint.Color{}
+	}
 	if o.LinkColor.Transparent() {
 		return DefaultLinkColor
 	}
