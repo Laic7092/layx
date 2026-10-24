@@ -192,6 +192,20 @@ func (l *Layout) renderPage(n int) *Page {
 	return p
 }
 
+// runColor resolves a run's paint colour. A style that names a colour keeps it
+// (author CSS wins); a link whose style names none takes the layout's
+// LinkColor, and everything else the layout's ink. Both come from Typography,
+// so a paint-only Relayout repaints them without re-breaking lines.
+func (w *textWorker) runColor(link bool, c paint.Color) paint.Color {
+	if !c.Transparent() {
+		return c
+	}
+	if link && !w.typo.LinkColor.Transparent() {
+		return w.typo.LinkColor
+	}
+	return w.typo.Color
+}
+
 type glyphPos struct {
 	runeIndex int
 	x0, x1    float32
@@ -256,10 +270,7 @@ func (l *Layout) buildLine(w *textWorker, it *flowItem, chapter int) ([]paint.Gl
 	for i := range runs {
 		sr := &runs[i]
 		ref := sr.ref
-		color := sr.style.color
-		if color.Transparent() {
-			color = w.typo.Color
-		}
+		color := w.runColor(sr.style.link, sr.style.color)
 		run := paint.GlyphRun{
 			Font:  ref,
 			Size:  float32(sr.out.Size) / 64,
@@ -296,16 +307,15 @@ func (l *Layout) buildLine(w *textWorker, it *flowItem, chapter int) ([]paint.Gl
 		out = append(out, run)
 	}
 	if it.para != nil && it.para.hyphenAt(it.end) {
-		st := it.para.styleAt(int(it.end) - 1)
-		langTag := ""
-		if seg := it.para.segAt(int(it.end) - 1); seg != nil {
-			langTag = seg.lang
+		at := int(it.end) - 1
+		st := it.para.styleAt(at)
+		var langTag string
+		var link bool
+		if seg := it.para.segAt(at); seg != nil {
+			langTag, link = seg.lang, seg.link != ""
 		}
 		if ref, size, hg, ok := w.shapeHyphen(st, langTag); ok {
-			color := st.Color
-			if color.Transparent() {
-				color = w.typo.Color
-			}
+			color := w.runColor(link, st.Color)
 			adv := float32(hg.Advance) / 64
 			if measured, ok := it.para.hyphAdv[it.end]; ok {
 				adv = measured

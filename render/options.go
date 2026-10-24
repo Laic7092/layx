@@ -62,6 +62,10 @@ func (l Limits) withDefaults() Limits {
 	return l
 }
 
+// DefaultLinkColor is the colour of link text whose document style names none
+// and whose host sets no Typography.LinkColor: the browser's own link blue.
+var DefaultLinkColor = paint.Color{R: 0x1a, G: 0x5f, B: 0xc4, A: 0xff}
+
 // Viewport is the page or window size in CSS pixels.
 type Viewport struct {
 	Width, Height float32
@@ -84,6 +88,12 @@ type Typography struct {
 	// Background is painted behind each page. A transparent value means the
 	// host is responsible for the page background.
 	Background paint.Color
+	// LinkColor paints link text whose style names no colour of its own, as an
+	// epub built with Options.ThemeLinks leaves it. It is paint-only: like
+	// Color, changing it needs a Relayout, not a new document. A transparent
+	// value means DefaultLinkColor. A link whose document style names a colour
+	// keeps that colour.
+	LinkColor paint.Color
 	// Rules carries the document-wide line-breaking and pagination policies.
 	// Its zero value is the spec default: no optional typography, and no
 	// widow/orphan protection. See TextRules.
@@ -105,6 +115,9 @@ func (t Typography) withDefaults() Typography {
 	}
 	if t.Color.Transparent() {
 		t.Color = paint.Color{R: 0, G: 0, B: 0, A: 0xff}
+	}
+	if t.LinkColor.Transparent() {
+		t.LinkColor = DefaultLinkColor
 	}
 	// Rules pads widows and orphans to their CSS initial value; everything
 	// else in it is already zero when unset (no optional typography).

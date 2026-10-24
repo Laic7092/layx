@@ -189,6 +189,7 @@ func paintKey(k *keyer, pageKeys []keyHash, typo Typography) keyHash {
 	}
 	k.color(typo.Color)
 	k.color(typo.Background)
+	k.color(typo.LinkColor)
 	return k.done()
 }
 

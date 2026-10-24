@@ -132,9 +132,12 @@ type runStyle struct {
 	color           paint.Color
 	decoration      TextDecoration
 	decorationColor paint.Color
+	// link marks link text: a link whose style names no colour takes the
+	// layout's Typography.LinkColor rather than its ink.
+	link bool
 }
 
-func compactRunStyle(st Style) runStyle {
+func compactRunStyle(st Style, link bool) runStyle {
 	return runStyle{
 		letterSpacing:   st.LetterSpacing,
 		wordSpacing:     st.WordSpacing,
@@ -142,6 +145,7 @@ func compactRunStyle(st Style) runStyle {
 		color:           st.Color,
 		decoration:      st.TextDecoration,
 		decorationColor: st.TextDecorationColor,
+		link:            link,
 	}
 }
 
@@ -193,7 +197,7 @@ func (w *textWorker) shapeRange(p *paragraph, start, end int, defaultLang langua
 				w.shapes.Add(1)
 			}
 			shaped := w.shaper.Shape(split)
-			out = append(out, shapedRun{out: shaped, style: compactRunStyle(seg.style), ref: w.refs[faceIndex(w.faces, shaped.Face)]})
+			out = append(out, shapedRun{out: shaped, style: compactRunStyle(seg.style, seg.link != ""), ref: w.refs[faceIndex(w.faces, shaped.Face)]})
 		}
 	}
 	for i := range out {

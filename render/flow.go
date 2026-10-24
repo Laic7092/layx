@@ -108,9 +108,11 @@ func inheritStyle(parent, child Style, typo Typography) Style {
 	if out.WordSpacing == 0 {
 		out.WordSpacing = typo.WordSpacing
 	}
-	if out.Color.Transparent() {
-		out.Color = typo.Color
-	}
+	// Color deliberately stays unresolved when neither the document nor an
+	// ancestor named one: Typography.Color is paint-only, so a resolved style
+	// that carried it would freeze the ink into the line boxes (BreakKey
+	// excludes colour) and a paint-only Relayout would keep the old ink. Page
+	// and tile building substitute the layout's Typography.Color instead.
 	if out.TextAlign == AlignDefault || out.TextAlign > AlignJustify {
 		out.TextAlign = typo.TextAlign
 	}
