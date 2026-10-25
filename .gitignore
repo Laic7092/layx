@@ -1,0 +1,14 @@
+# Go test binaries and profiles
+*.test
+*.out
+*.prof
+coverage.*
+
+# Editor / OS noise
+.DS_Store
+.idea/
+.vscode/
+
+# Rendered output from cmd/layx-shot
+*.png
+!testdata/*.png
