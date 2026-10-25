@@ -56,11 +56,10 @@ func (r *Rasterizer) ClipRect(rc paint.Rect) {
 		rowOff := (y - area.Y0) * width
 		base := y * r.w
 		for x := area.X0; x < area.X1; x++ {
-			f := cov[rowOff+x-area.X0]
-			if f <= 0 {
+			v := uint32(cov[rowOff+x-area.X0])
+			if v == 0 {
 				continue
 			}
-			v := uint32(f*255 + 0.5)
 			if old != nil {
 				v = v * uint32(old[base+x]) / 255
 			}

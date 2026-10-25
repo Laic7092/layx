@@ -331,13 +331,16 @@ func (b *builder) cubeTo(c1x, c1y, c2x, c2y, x, y float32) {
 }
 
 // flattenTol is the maximum deviation of a flattened curve from the true
-// curve, in device pixels.
+// curve, in device pixels, and flattenTol2 its square, so the subdivision test
+// can compare squared distances and skip the square roots.
 const flattenTol = 0.2
+
+const flattenTol2 = flattenTol * flattenTol
 
 const flattenDepth = 16
 
 func flattenQuad(s *shape, p0, c, p1 point, depth int) {
-	if depth >= flattenDepth || pointLineDistance(c, p0, p1) <= flattenTol {
+	if depth >= flattenDepth || withinTol(c, p0, p1) {
 		s.lineTo(p1)
 		return
 	}
@@ -353,8 +356,7 @@ func flattenCube(s *shape, p0, c1, c2, p1 point, depth int) {
 		s.lineTo(p1)
 		return
 	}
-	d := maxf(pointLineDistance(c1, p0, p1), pointLineDistance(c2, p0, p1))
-	if d <= flattenTol {
+	if withinTol(c1, p0, p1) && withinTol(c2, p0, p1) {
 		s.lineTo(p1)
 		return
 	}
@@ -372,14 +374,18 @@ func midpoint(a, b point) point {
 	return point{X: (a.X + b.X) / 2, Y: (a.Y + b.Y) / 2}
 }
 
-func pointLineDistance(p, a, b point) float32 {
+// withinTol reports whether p is within flattenTol of the segment a-b. The
+// distance is |cross| / |b-a|, so the test squares both sides instead of taking
+// two square roots: cross^2 <= tol^2 * |b-a|^2.
+func withinTol(p, a, b point) bool {
 	dx, dy := b.X-a.X, b.Y-a.Y
-	if dx == 0 && dy == 0 {
-		return float32(math.Hypot(float64(p.X-a.X), float64(p.Y-a.Y)))
+	px, py := p.X-a.X, p.Y-a.Y
+	len2 := dx*dx + dy*dy
+	if len2 == 0 {
+		return px*px+py*py <= flattenTol2
 	}
-	// |cross| / |b-a|
-	cross := (p.X-a.X)*dy - (p.Y-a.Y)*dx
-	return absf(cross) / float32(math.Hypot(float64(dx), float64(dy)))
+	cross := px*dy - py*dx
+	return cross*cross <= flattenTol2*len2
 }
 
 // roundRectCorner is the cubic control-point ratio for a quarter circle.

@@ -64,16 +64,20 @@ go run ./cmd/layx-shot -font book.ttf -text chapter.txt -page 0 -out page.png
 | `NewCoverage` / `Reset` | 一块可复用的设备空间覆盖率缓冲，画路径、取 8 位 alpha |
 | `Coverage.MoveTo/LineTo/QuadTo/CubeTo/Alpha` | 非零环绕、隐式闭合；`layx-reader` 的字形图集用它，逐字形栅格化一次 |
 
-`Coverage` 是 `Rasterizer` 内部填充字形与矢量形状的同一套扫描线（8 条竖向子采样 +
-水平解析面积、活动边表），只是少了整页状态与混合。需要自己的图集/字形缓存、或只想
-要一张 alpha mask 的宿主直接用它，不必实现 `paint.Painter`。
+`Coverage` 是 `Rasterizer` 内部填充字形与矢量形状的同一套积分器（精确面积、非零
+环绕），只是少了整页状态与混合。需要自己的图集/字形缓存、或只想要一张 alpha mask
+的宿主直接用它，不必实现 `paint.Painter`。
 
 其他行为：
 
-- **抗锯齿**：8 条竖向子扫描线 + 水平解析覆盖率；不依赖平台字体光栅器。
+- **抗锯齿**：逐像素**精确面积积分**，不做超采样。每条边按它穿过的每个像素行
+  落一块带符号面积，行内从左到右累加出环绕数，取绝对值并夹到 1 就是覆盖率：
+  水平方向的覆盖率是解析的，竖直方向由行重叠自然得到。
+- **工作量与路径成正比**：只有边真正穿过的行才会被写；像素循环每行一次。
 - **字形图集**：`Coverage` 逐字形输出覆盖率，`layx-reader` 的图集把结果存进纹理；
-  冷栅格（每页第一次见到字形）比 `golang.org/x/image/vector` 慢约一个数量级，
-  暖帧不受影响。该读者默认用它，`LAYX_GLYPH_RASTER=vector` 可回退。
+  那是屏幕和离屏（PNG）共用的同一个光栅器，所以屏幕上的一页和导出的 PNG 是同一批
+  像素。冷栅格（每页第一次见到字形）约 3.3 µs/字形（17 DIP、DPR 2、CJK），
+  暖帧只查表，不受影响。
 - **合成粗体**：`GlyphRun.EmulateBold` 时沿文字自身 x 轴再画一遍（不改变布局）。
 - **对齐坐标**：side bearing 与基线都来自 `paint.Glyph`，不会重新 shaping 字符串。
 - **不拥有字体**：只读取 `paint.Font.Data`，按「地址 + 长度 + 面索引」解析并缓存。
@@ -100,7 +104,7 @@ layx-raster/
   clip.go         裁剪的快速路径与覆盖率掩码，Visible
   geometry.go     仿射、box→device、扁平化（二次/三次贝塞尔）、shape
   coverage.go     字形级覆盖率 API（Coverage）：路径、8 位 alpha、可复用
-  cover.go        活动边表、竖向子采样、水平面积累积、混合
+  cover.go        精确面积积分（带符号面积）、字节累积、混合
   glyph.go        字体解析缓存、轮廓缓存、字形路径、合成粗体
   image.go        DrawImage 的逆映射与双线性采样
   cmd/layx-shot   文本 → 文档 → 一页 PNG 的最小示例
@@ -116,8 +120,13 @@ layx-raster/
 ```sh
 go test ./...
 go run ./cmd/layx-shot -font testdata/DejaVuSerif.ttf -out /tmp/page.png
+
+# 覆盖率：与 16x16 点采样的暴力对照，以及字形大小的路径开销
+go test -run TestCoverage -v .
+go test -run XXX -bench 'BenchmarkCoverageGlyph|BenchmarkDrawGlyphs' -benchtime 2s .
 ```
 
-测试覆盖：矩形/α 混合/半像素覆盖、变换组合、Save/Restore、整数与小数裁剪、
-裁剪掩码在 Restore 后不被污染、圆角、描边环、图像 1:1 与缩放、字形确定性/粗体/旋转、
-以及从 `render.Document` 到 `Page.Draw` 的整页端到端（含超出画布平移后的剔除正确性）。
+测试覆盖：矩形/α 混合/半像素覆盖、覆盖率与点采样的暴力对照（三角形、洞、圆）、
+变换组合、Save/Restore、整数与小数裁剪、裁剪掩码在 Restore 后不被污染、圆角、
+描边环、图像 1:1 与缩放、字形确定性/粗体/旋转，以及从 `render.Document` 到
+`Page.Draw` 的整页端到端（含超出画布平移后的剔除正确性）。

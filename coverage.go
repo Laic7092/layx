@@ -17,7 +17,6 @@ type Coverage struct {
 	shape   shape
 	edges   []edge
 	scratch coverageScratch
-	out     []uint8
 }
 
 // NewCoverage returns an empty coverage rasterizer. Reset sizes it before the
@@ -80,27 +79,9 @@ func (c *Coverage) ClosePath() {}
 // bytes to a row. The slice is owned by the Coverage and stays valid until the
 // next call on it. Pixels outside the path are zero.
 func (c *Coverage) Alpha() []uint8 {
-	n := c.w * c.h
-	if n <= 0 {
+	if c.w <= 0 || c.h <= 0 {
 		return nil
 	}
-	area := pixArea{X0: 0, Y0: 0, X1: c.w, Y1: c.h}
 	c.edges = shapeEdges(&c.shape, c.edges[:0])
-	rasterizeCoverage(c.edges, area, &c.scratch)
-	if cap(c.out) < n {
-		c.out = make([]uint8, n)
-	}
-	out := c.out[:n]
-	for i, f := range c.scratch.cov[:n] {
-		v := f*255 + 0.5
-		switch {
-		case v <= 0:
-			out[i] = 0
-		case v >= 255:
-			out[i] = 255
-		default:
-			out[i] = uint8(v)
-		}
-	}
-	return out
+	return rasterizeCoverage(c.edges, pixArea{X0: 0, Y0: 0, X1: c.w, Y1: c.h}, &c.scratch)
 }

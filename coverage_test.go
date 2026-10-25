@@ -151,9 +151,9 @@ func windingAt(s *shape, x, y float32) int {
 }
 
 // TestCoverageMatchesSupersampling checks a few shapes against a brute-force
-// 16x16 point sample per pixel. It is coarse on purpose: the rasterizer's
-// vertical sampling is 8 sub-scanlines, so this test catches a wrong span,
-// direction or winding, not the last bit of antialiasing.
+// 16x16 point sample per pixel. The rasterizer integrates the area exactly, so
+// the two agree to what a 16x16 sample can resolve; the thresholds catch a wrong
+// span, direction or winding, not the last bit of antialiasing.
 func TestCoverageMatchesSupersampling(t *testing.T) {
 	build := map[string]func(*Coverage){
 		"triangle": func(c *Coverage) {
@@ -210,14 +210,42 @@ func TestCoverageMatchesSupersampling(t *testing.T) {
 						diff = -diff
 					}
 					totalDiff += diff
-					if diff > 24 {
+					if diff > 12 {
 						t.Fatalf("pixel (%d,%d) = %d, supersampling says %.0f", px, py, cov[py*size+px], want)
 					}
 				}
 			}
-			if mean := totalDiff / (size * size); mean > 3 {
+			if mean := totalDiff / (size * size); mean > 1.5 {
 				t.Fatalf("mean difference %.2f of 255 from supersampling", mean)
 			}
 		})
 	}
+}
+
+// BenchmarkCoverageGlyph measures a glyph-sized path: a dense outline in a box
+// the size of a CJK glyph at 17 DIP and DPR 2, with the edge count a glyph's
+// curves flatten to. It is the cold cost of one glyph atlas slot.
+func BenchmarkCoverageGlyph(b *testing.B) {
+	build := func(c *Coverage) {
+		// Four rings of eight cubics: a glyph-scale outline with both large
+		// curves and tight corners.
+		for ring := 0; ring < 4; ring++ {
+			cx, cy := float32(8+ring*5), float32(8+ring*5)
+			r := float32(13 - ring*3)
+			k := r * 0.5522847498307936
+			c.MoveTo(cx+r, cy)
+			c.CubeTo(cx+r, cy+k, cx+k, cy+r, cx, cy+r)
+			c.CubeTo(cx-k, cy+r, cx-r, cy+k, cx-r, cy)
+			c.CubeTo(cx-r, cy-k, cx-k, cy-r, cx, cy-r)
+			c.CubeTo(cx+k, cy-r, cx+r, cy-k, cx+r, cy)
+		}
+	}
+	c := NewCoverage()
+	b.ReportAllocs()
+	for b.Loop() {
+		c.Reset(34, 34)
+		build(c)
+		c.Alpha()
+	}
+	b.ReportMetric(float64(b.Elapsed().Nanoseconds())/float64(b.N), "ns/glyph")
 }

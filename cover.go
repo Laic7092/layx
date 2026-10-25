@@ -1,38 +1,25 @@
 package raster
 
 import (
-	"slices"
+	"math"
 
 	"github.com/laix/layx/render/paint"
 )
-
-// coverageSamples is the number of vertical sub-scanlines per pixel row.
-// Horizontal coverage is analytic, so the total is 8 samples per pixel with
-// exact x areas; that is enough to keep text edges smooth without a mask the
-// size of the surface for every glyph.
-const coverageSamples = 8
 
 // edge is one side of a contour, already in device space. dir is +1 for a
 // downward edge and -1 for an upward one; the non-zero winding rule only needs
 // consistent signs.
 type edge struct {
 	x0, y0, x1, y1 float32
-	// ymin and ymax are y0 and y1 sorted; dxdy is dx/dy, so a scanline's
-	// crossing needs one multiply instead of a division. xc is this edge's x
-	// at the row's middle, filled in per row for the crossing sort.
+	// ymin and ymax are y0 and y1 sorted; dxdy is dx/dy, so a row's start x
+	// needs one multiply instead of a division.
 	ymin, ymax float32
 	dxdy       float32
-	xc         float32
 	dir        int8
 }
 
-type crossing struct {
-	x   float32
-	dir int8
-}
-
 // shapeEdges flattens every contour of s into edges. Horizontal edges are
-// skipped: a scanline never crosses one.
+// skipped: an edge that does not cross a row deposits nothing in it.
 func shapeEdges(s *shape, edges []edge) []edge {
 	for i := range s.starts {
 		start, end := s.contourRange(i)
@@ -63,132 +50,198 @@ func shapeEdges(s *shape, edges []edge) []edge {
 	return edges
 }
 
-// coverageScratch is the reusable working set of one rasterizer. Keeping it in
-// one struct lets the active list and the crossings keep their capacity from
-// one fill to the next.
+// coverageScratch is the reusable working set of one rasterizer: alpha is the
+// coverage of the last path, and cells holds the signed areas it is summed
+// from, one width+2 row per pixel row, already in units of 255 so the sum can
+// be stored as a byte without a scale factor.
+//
+// A row of cells is width+2: cell 0 collects every crossing left of the
+// surface, so the winding entering the left edge still counts, cell 1..width
+// are the pixels, and the last cell is a sink for crossings right of the
+// surface, which no pixel inside it is left of.
 type coverageScratch struct {
-	cov    []float32
-	active []edge
-	cross  []crossing
+	alpha []uint8
+	cells []float32
 }
 
-// rasterizeCoverage fills s.cov with the fraction of each pixel in area
-// covered by the non-zero winding of edges, one value per pixel in row-major
-// order.
+// rasterizeCoverage fills s.alpha with the fraction of each pixel covered by
+// the non-zero winding of edges, one byte per pixel in row-major order.
 //
-// Each pixel row is sampled at coverageSamples sub-scanlines; horizontal
-// coverage is exact for each span. An active edge list keeps the work
-// proportional to the edges that reach the row (a glyph has hundreds of edges
-// but only a few cross any one scanline), and the crossings are sorted once per
-// row, by the row's middle, instead of once per sub-scanline: within a pixel
-// row the outline almost never crosses itself, so the order holds for every
-// sample and each sample only drops the edges that do not reach it.
-func rasterizeCoverage(edges []edge, area pixArea, s *coverageScratch) {
-	n := area.width() * area.height()
-	if cap(s.cov) < n {
-		s.cov = make([]float32, n)
+// It integrates instead of sampling. Every edge deposits, for each pixel row it
+// crosses, a signed area spread over the pixels that row's segment spans: the
+// sum over a row is the row overlap dy times the edge's direction, and each
+// pixel's part is the area of the segment's trapezoid inside it. Rows are then
+// summed left to right, which turns those areas into the winding number at each
+// pixel's left edge; its magnitude clamped to one is the pixel's coverage.
+// Horizontal antialiasing is therefore exact, vertical antialiasing falls out of
+// the row overlap, and nothing is supersampled.
+//
+// The work is proportional to the rows each edge crosses plus the surface once,
+// not to the rows times the surface: a glyph's hundreds of edges touch only a
+// few rows each.
+func rasterizeCoverage(edges []edge, area pixArea, s *coverageScratch) []uint8 {
+	width, height := area.width(), area.height()
+	n := width * height
+	if n <= 0 {
+		s.alpha = s.alpha[:0]
+		return nil
 	}
-	s.cov = s.cov[:n]
-	for i := range s.cov {
-		s.cov[i] = 0
+	if cap(s.alpha) < n {
+		s.alpha = make([]uint8, n)
 	}
-	s.active = s.active[:0]
+	alpha := s.alpha[:n]
+	s.alpha = alpha
 	if len(edges) == 0 {
-		return
+		clear(alpha)
+		return alpha
 	}
 
-	slices.SortFunc(edges, func(a, b edge) int {
-		switch {
-		case a.ymin < b.ymin:
-			return -1
-		case a.ymin > b.ymin:
-			return 1
-		}
-		return 0
-	})
+	// base is the index of column area.X0-1 in a row, the carry cell.
+	stride := width + 2
+	if cap(s.cells) < stride*height {
+		s.cells = make([]float32, stride*height)
+	}
+	cells := s.cells[:stride*height]
+	s.cells = cells
+	clear(cells)
+	base := area.X0 - 1
+	sink := stride - 1
 
-	const weight = 1 / float32(coverageSamples)
-	width := area.width()
-	next := 0
-	cross := s.cross[:0]
+	for i := range edges {
+		e := &edges[i]
 
-	for row := area.Y0; row < area.Y1; row++ {
-		top := float32(row)
-		bottom := top + 1
-		for next < len(edges) && edges[next].ymin < bottom {
-			s.active = append(s.active, edges[next])
-			next++
-		}
-		if len(s.active) > 0 {
-			kept := 0
-			for _, e := range s.active {
-				if e.ymax > top {
-					s.active[kept] = e
-					kept++
-				}
-			}
-			s.active = s.active[:kept]
-		}
-		if len(s.active) < 2 {
+		y0 := clampRow(int(math.Floor(float64(e.ymin))), area.Y0, area.Y1)
+		y1 := clampRow(int(math.Ceil(float64(e.ymax))), area.Y0, area.Y1)
+		if y0 >= y1 {
 			continue
 		}
 
-		mid := top + 0.5
-		for i := range s.active {
-			e := &s.active[i]
-			e.xc = e.x0 + (mid-e.y0)*e.dxdy
+		// x is the edge's x where it enters the first visible row, which is the
+		// edge's own start on the top row and the row's top after that.
+		start := float32(y0)
+		if start < e.ymin {
+			start = e.ymin
 		}
-		sortActiveByX(s.active)
+		x := e.x0 + (start-e.y0)*e.dxdy
+		// Areas are 255 times the covered fraction, so a pixel's winding sum is
+		// already the byte the coverage wants.
+		dir := float32(e.dir) * 255
+		line := cells[(y0-area.Y0)*stride:]
 
-		rowCov := s.cov[(row-area.Y0)*width : (row-area.Y0)*width+width]
-		for sample := 0; sample < coverageSamples; sample++ {
-			y := top + (float32(sample)+0.5)*weight
-			cross = cross[:0]
-			for i := range s.active {
-				e := &s.active[i]
-				if y < e.ymin || y >= e.ymax {
-					continue
-				}
-				cross = append(cross, crossing{x: e.x0 + (y-e.y0)*e.dxdy, dir: e.dir})
-			}
-			if len(cross) < 2 {
-				continue
-			}
-			// The row's order holds unless the outline crosses itself inside
-			// this row; check instead of trusting, and fix it if it does not.
-			sorted := true
-			for i := 1; i < len(cross); i++ {
-				if cross[i].x < cross[i-1].x {
-					sorted = false
-					break
-				}
-			}
-			if !sorted {
-				sortCrossings(cross)
-			}
-			wind := 0
-			for i := 0; i+1 < len(cross); i++ {
-				wind += int(cross[i].dir)
-				if wind == 0 {
-					continue
-				}
-				addSpan(rowCov, cross[i].x-float32(area.X0), cross[i+1].x-float32(area.X0), weight)
-			}
+		for row := y0; row < y1; row++ {
+			top := float32(row)
+			dy := minf(top+1, e.ymax) - maxf(top, e.ymin)
+			xNext := x + dy*e.dxdy
+			deposit(line, base, sink, dy*dir, x, xNext)
+			x = xNext
+			line = line[stride:]
 		}
 	}
-	s.cross = cross[:0]
+
+	// One row of this shape is the winding at each pixel's left edge, so the
+	// row's cells are summed in place. Converting to bytes here, rather than
+	// into a float coverage buffer for the caller to walk again, is one pass
+	// over the pixels instead of two.
+	for row := 0; row < height; row++ {
+		line := cells[row*stride : row*stride+stride]
+		out := alpha[row*width : row*width+width]
+		acc := line[0]
+		for x, v := range line[1 : 1+width] {
+			acc += v
+			// The magnitude of the winding, without a branch: clear the sign
+			// bit. max(acc, -acc) is the same value but the builtin keeps the
+			// NaN check, which costs a branch.
+			a := math.Float32frombits(math.Float32bits(acc) & 0x7fffffff)
+			if a > 255 {
+				a = 255
+			}
+			out[x] = uint8(a + 0.5)
+		}
+	}
+	return alpha
 }
 
-func sortActiveByX(active []edge) {
-	for i := 1; i < len(active); i++ {
-		e := active[i]
-		j := i - 1
-		for j >= 0 && active[j].xc > e.xc {
-			active[j+1] = active[j]
-			j--
-		}
-		active[j+1] = e
+// deposit spreads d, the signed vertical overlap of a segment running from x to
+// xNext inside one pixel row, over the pixels of that row. d is measured in
+// coverage units of 255, matching the cells.
+func deposit(line []float32, base, sink int, d, x, xNext float32) {
+	x0, x1 := x, xNext
+	if x0 > x1 {
+		x0, x1 = x1, x0
 	}
+	x0i := int(math.Floor(float64(x0)))
+	x0Floor := float32(x0i)
+	x1i := int(math.Ceil(float64(x1)))
+	x1Ceil := float32(x1i)
+
+	if x1i <= x0i+1 {
+		// The segment stays within one pixel column: its area is split at its
+		// mean x.
+		xmf := 0.5*(x+xNext) - x0Floor
+		line[cellIndex(x0i, base, sink)] += d - d*xmf
+		line[cellIndex(x0i+1, base, sink)] += d * xmf
+		return
+	}
+
+	// A trapezoid over several pixels: each one's part is the area between the
+	// segment and the bottom edge of the row.
+	sc := 1 / (x1 - x0)
+	x0f := x0 - x0Floor
+	a0 := 0.5 * sc * (1 - x0f) * (1 - x0f)
+	x1f := x1 - x1Ceil + 1
+	am := 0.5 * sc * x1f * x1f
+
+	line[cellIndex(x0i, base, sink)] += d * a0
+	if x1i == x0i+2 {
+		line[cellIndex(x0i+1, base, sink)] += d * (1 - a0 - am)
+	} else {
+		a1 := sc * (1.5 - x0f)
+		line[cellIndex(x0i+1, base, sink)] += d * (a1 - a0)
+
+		// The pixels in between all get the same share. The loop is clipped to
+		// the row, so a segment running far outside the surface still only
+		// costs its visible part.
+		dTimesS := d * sc
+		from := base
+		if x0i+2 > from {
+			from = x0i + 2
+		}
+		to := sink
+		if x1i-1 < to {
+			to = x1i - 1
+		}
+		for xi := from; xi < to; xi++ {
+			line[xi-base] += dTimesS
+		}
+
+		a2 := a1 + sc*float32(x1i-x0i-3)
+		line[cellIndex(x1i-1, base, sink)] += d * (1 - a2 - am)
+	}
+	line[cellIndex(x1i, base, sink)] += d * am
+}
+
+// cellIndex maps a pixel column to its cell in a row: 0 for the carry, the
+// pixel itself in between, and the row's sink for anything right of the
+// surface.
+func cellIndex(xi, base, sink int) int {
+	j := xi - base
+	if j < 0 {
+		return 0
+	}
+	if j > sink {
+		return sink
+	}
+	return j
+}
+
+func clampRow(v, lo, hi int) int {
+	if v < lo {
+		return lo
+	}
+	if v > hi {
+		return hi
+	}
+	return v
 }
 
 // edgesFor flattens s into the rasterizer's scratch slice.
@@ -198,53 +251,8 @@ func (r *Rasterizer) edgesFor(s *shape) []edge {
 }
 
 // coverage rasterizes edges into the rasterizer's scratch slice.
-func (r *Rasterizer) coverage(edges []edge, area pixArea) []float32 {
-	rasterizeCoverage(edges, area, &r.scratch)
-	return r.scratch.cov[:area.width()*area.height()]
-}
-
-func sortCrossings(xs []crossing) {
-	for i := 1; i < len(xs); i++ {
-		c := xs[i]
-		j := i - 1
-		for j >= 0 && xs[j].x > c.x {
-			xs[j+1] = xs[j]
-			j--
-		}
-		xs[j+1] = c
-	}
-}
-
-// addSpan adds the horizontal coverage of [x0,x1) (in pixels relative to the
-// row) to row, weighted by the sub-scanline share.
-func addSpan(row []float32, x0, x1, weight float32) {
-	if x1 <= x0 {
-		return
-	}
-	n := len(row)
-	if x0 < 0 {
-		x0 = 0
-	}
-	if x1 > float32(n) {
-		x1 = float32(n)
-	}
-	if x1 <= x0 {
-		return
-	}
-	i0 := int(x0)
-	i1 := int(x1)
-	if i1 >= n {
-		i1 = n - 1
-	}
-	if i0 == i1 {
-		row[i0] += (x1 - x0) * weight
-		return
-	}
-	row[i0] += (float32(i0+1) - x0) * weight
-	for i := i0 + 1; i < i1; i++ {
-		row[i] += weight
-	}
-	row[i1] += (x1 - float32(i1)) * weight
+func (r *Rasterizer) coverage(edges []edge, area pixArea) []uint8 {
+	return rasterizeCoverage(edges, area, &r.scratch)
 }
 
 // fillShape rasterizes s with the non-zero winding rule and blends it into the
@@ -299,17 +307,13 @@ func (r *Rasterizer) fillDeviceRect(rect paint.Rect, c paint.Color) {
 }
 
 // blendCoverage blends color c through a coverage buffer for area.
-func (r *Rasterizer) blendCoverage(area pixArea, cov []float32, c paint.Color) {
+func (r *Rasterizer) blendCoverage(area pixArea, cov []uint8, c paint.Color) {
 	width := area.width()
 	for y := area.Y0; y < area.Y1; y++ {
 		rowOff := (y - area.Y0) * width
 		rowBase := y * r.w
 		for x := area.X0; x < area.X1; x++ {
-			f := cov[rowOff+x-area.X0]
-			if f <= 0 {
-				continue
-			}
-			a := uint32(f*255 + 0.5)
+			a := uint32(cov[rowOff+x-area.X0])
 			if a == 0 {
 				continue
 			}
