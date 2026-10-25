@@ -285,58 +285,182 @@ func (r *Rasterizer) fillShape(s *shape, c paint.Color, tone *Tone) {
 	r.blendCoverage(area, r.coverage(r.edgesFor(s), area, tone), c)
 }
 
-// fillDeviceRect fills an axis-aligned device rectangle with exact per-pixel
-// area coverage. Page backgrounds and borders take this path, so a full-page
-// fill does not pay for scanline setup.
+// fillDeviceRect fills the axis-aligned rect, whose edges may fall anywhere in
+// the pixel grid. A pixel's coverage is the area of the overlap of the pixel and
+// the rect, which is the product of the row's overlap and the column's — so a
+// row is one span of full columns plus at most two partial ones, and the span's
+// coverage is the same for every pixel in it. That matters: a page's paper is
+// one such rect covering the whole surface, and walking it a float multiply and
+// three divides at a time is most of the cost of drawing a page of text.
 func (r *Rasterizer) fillDeviceRect(rect paint.Rect, c paint.Color) {
 	area := intersectArea(areaOf(rect, r.w, r.h), r.state.clip.area)
 	if area.empty() {
 		return
 	}
+	// The columns every row crosses fully, clipped to the area: the pixels
+	// outside them are the fractional edges, which are blended one at a time.
+	fx0 := int(math.Ceil(float64(rect.X)))
+	fx1 := int(math.Floor(float64(rect.X + rect.Width)))
+	x0, x1 := area.X0, area.X0
+	if fx1 > fx0 {
+		x0 = min(max(fx0, area.X0), area.X1)
+		x1 = min(max(fx1, area.X0), area.X1)
+	}
+	xEnd, yEnd := rect.X+rect.Width, rect.Y+rect.Height
+	mask := r.state.clip.mask
 	for y := area.Y0; y < area.Y1; y++ {
-		fy := spanOverlap(float32(y), float32(y+1), rect.Y, rect.Y+rect.Height)
+		fy := spanOverlap(float32(y), float32(y+1), rect.Y, yEnd)
 		if fy <= 0 {
 			continue
 		}
-		rowBase := y * r.w
-		for x := area.X0; x < area.X1; x++ {
-			fx := spanOverlap(float32(x), float32(x+1), rect.X, rect.X+rect.Width)
-			if fx <= 0 {
-				continue
+		if a := uint32(fy*255 + 0.5); x1 > x0 && a != 0 {
+			if mask == nil {
+				r.blendSpan(y, x0, x1, c, a)
+			} else {
+				r.blendSpanMasked(y, x0, x1, c, a, mask)
 			}
-			a := uint32(fx*fy*255 + 0.5)
-			if a == 0 {
-				continue
-			}
-			if m := r.state.clip.mask; m != nil {
-				a = a * uint32(m[rowBase+x]) / 255
+		}
+		// The partial columns: left of the span, then right of it.
+		for _, span := range [2][2]int{{area.X0, x0}, {x1, area.X1}} {
+			for x := span[0]; x < span[1]; x++ {
+				fx := spanOverlap(float32(x), float32(x+1), rect.X, xEnd)
+				a := uint32(fx*fy*255 + 0.5)
 				if a == 0 {
 					continue
 				}
+				if mask != nil {
+					a = a * uint32(mask[y*r.w+x]) / 255
+					if a == 0 {
+						continue
+					}
+				}
+				r.blend(x, y, c, a)
 			}
-			r.blend(x, y, c, a)
 		}
 	}
 }
 
-// blendCoverage blends color c through a coverage buffer for area.
+// solidPattern is the 64-byte tile a solid span is written from: the pixel
+// repeated, which turns filling a rectangle into the same memmove loop the
+// runtime uses to clear memory — the widest store the CPU has, sixteen pixels at
+// a time. Writing four bytes a pixel is six times slower.
+type solidPattern [64]byte
+
+// patternFor returns the tile for c, opaque, premultiplied (which for an opaque
+// colour is the colour itself).
+func patternFor(c paint.Color) solidPattern {
+	var p solidPattern
+	for i := 0; i < len(p); i += 4 {
+		p[i], p[i+1], p[i+2], p[i+3] = c.R, c.G, c.B, 0xff
+	}
+	return p
+}
+
+// fillPattern writes pat over p, whose length is a multiple of four.
+func fillPattern(p []byte, pat *solidPattern) {
+	n := len(p) &^ 63
+	for i := 0; i < n; i += 64 {
+		copy(p[i:i+64], pat[:])
+	}
+	n += len(p[n:]) &^ 15
+	for i := len(p) &^ 63; i < n; i += 16 {
+		copy(p[i:i+16], pat[:16])
+	}
+	for i := n; i+4 <= len(p); i += 4 {
+		copy(p[i:i+4], pat[:4])
+	}
+}
+
+// blendSpan composites c with the same coverage a over row y, x0 to x1.
+func (r *Rasterizer) blendSpan(y, x0, x1 int, c paint.Color, a uint32) {
+	sa := a * uint32(c.A) / 255
+	if sa == 0 {
+		return
+	}
+	if sa == 255 {
+		// Opaque: the pixels are the colour, whatever was under them.
+		pat := patternFor(c)
+		i := r.img.PixOffset(x0+r.ox, y+r.oy)
+		fillPattern(r.img.Pix[i:i+(x1-x0)*4], &pat)
+		return
+	}
+	inv := 255 - sa
+	br := uint32(c.R)*sa + 127
+	bg := uint32(c.G)*sa + 127
+	bb := uint32(c.B)*sa + 127
+	ba := 255*sa + 127
+	i := r.img.PixOffset(x0+r.ox, y+r.oy)
+	p := r.img.Pix[i : i+(x1-x0)*4]
+	for k := 0; k < len(p); k += 4 {
+		p[k] = uint8(div255(br + uint32(p[k])*inv))
+		p[k+1] = uint8(div255(bg + uint32(p[k+1])*inv))
+		p[k+2] = uint8(div255(bb + uint32(p[k+2])*inv))
+		p[k+3] = uint8(div255(ba + uint32(p[k+3])*inv))
+	}
+}
+
+// blendSpanMasked is blendSpan under a coverage mask, which gives every pixel
+// its own coverage: rare (only inside a rotated or fractional clip) and slower
+// by the mask lookup.
+func (r *Rasterizer) blendSpanMasked(y, x0, x1 int, c paint.Color, a uint32, mask []uint8) {
+	for x := x0; x < x1; x++ {
+		if m := a * uint32(mask[y*r.w+x]) / 255; m != 0 {
+			r.blend(x, y, c, m)
+		}
+	}
+}
+
+// div255 is x/255 rounded, exact for x up to 255*255+127: the two shifts are
+// enough because 255 is one below a power of two, which is also why the four
+// divides this replaces were worth replacing.
+func div255(x uint32) uint32 {
+	x += 128
+	return (x + (x >> 8)) >> 8
+}
+
+// blendCoverage blends color c through a coverage buffer for area. The
+// coverage of a glyph is what most of the blending in a page of text is, so the
+// row's pixel offset and the ink's premultiplied terms are hoisted out of the
+// pixel loop, and the coverage scale is skipped entirely for an opaque ink.
 func (r *Rasterizer) blendCoverage(area pixArea, cov []uint8, c paint.Color) {
 	width := area.width()
+	mask := r.state.clip.mask
+	ca := uint32(c.A)
+	cr, cg, cb := uint32(c.R), uint32(c.G), uint32(c.B)
+	opaque := ca == 255
 	for y := area.Y0; y < area.Y1; y++ {
 		rowOff := (y - area.Y0) * width
-		rowBase := y * r.w
-		for x := area.X0; x < area.X1; x++ {
-			a := uint32(cov[rowOff+x-area.X0])
-			if a == 0 {
+		var mrow []uint8
+		if mask != nil {
+			mrow = mask[y*r.w+area.X0 : y*r.w+area.X1]
+		}
+		i := r.img.PixOffset(area.X0+r.ox, y+r.oy)
+		p := r.img.Pix[i : i+width*4 : i+width*4]
+		for k, cv := range cov[rowOff : rowOff+width] {
+			if cv == 0 {
 				continue
 			}
-			if m := r.state.clip.mask; m != nil {
-				a = a * uint32(m[rowBase+x]) / 255
-				if a == 0 {
-					continue
+			sa := uint32(cv)
+			if !opaque || mrow != nil {
+				if mrow != nil {
+					sa = sa * uint32(mrow[k]) / 255
+					if sa == 0 {
+						continue
+					}
+				}
+				if !opaque {
+					sa = sa * ca / 255
+					if sa == 0 {
+						continue
+					}
 				}
 			}
-			r.blend(x, y, c, a)
+			inv := 255 - sa
+			q := p[k*4 : k*4+4]
+			q[0] = uint8(div255(cr*sa + uint32(q[0])*inv))
+			q[1] = uint8(div255(cg*sa + uint32(q[1])*inv))
+			q[2] = uint8(div255(cb*sa + uint32(q[2])*inv))
+			q[3] = uint8(div255(255*sa + uint32(q[3])*inv))
 		}
 	}
 }
@@ -352,8 +476,8 @@ func (r *Rasterizer) blend(x, y int, c paint.Color, a uint32) {
 	i := r.img.PixOffset(x+r.ox, y+r.oy)
 	p := r.img.Pix[i : i+4]
 
-	p[0] = uint8((uint32(c.R)*sa + uint32(p[0])*inv + 127) / 255)
-	p[1] = uint8((uint32(c.G)*sa + uint32(p[1])*inv + 127) / 255)
-	p[2] = uint8((uint32(c.B)*sa + uint32(p[2])*inv + 127) / 255)
-	p[3] = uint8((255*sa + uint32(p[3])*inv + 127) / 255)
+	p[0] = uint8(div255(uint32(c.R)*sa + uint32(p[0])*inv))
+	p[1] = uint8(div255(uint32(c.G)*sa + uint32(p[1])*inv))
+	p[2] = uint8(div255(uint32(c.B)*sa + uint32(p[2])*inv))
+	p[3] = uint8(div255(255*sa + uint32(p[3])*inv))
 }

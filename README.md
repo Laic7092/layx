@@ -77,6 +77,9 @@ go run ./cmd/layx-shot -font book.ttf -text chapter.txt -page 0 -out page.png
   落一块带符号面积，行内从左到右累加出环绕数，取绝对值并夹到 1 就是覆盖率：
   水平方向的覆盖率是解析的，竖直方向由行重叠自然得到。
 - **工作量与路径成正比**：只有边真正穿过的行才会被写；像素循环每行一次。
+- **矩形不逐像素算覆盖率**：一行是「一段整列 + 最多两个小数边缘像素」，整列的
+  覆盖率整行相同；不透明时直接按 64 字节的色块 memmove 写出去（一个 840×1200 的
+  纸面 0.19 ms，逐像素混合要 5 ms）。混合里的除以 255 全部换成移位加法。
 - **字形图集**：`Coverage` 逐字形输出覆盖率，`layx-reader` 的图集把结果存进纹理；
   那是屏幕和离屏（PNG）共用的同一个光栅器，所以屏幕上的一页和导出的 PNG 是同一批
   像素。冷栅格（每页第一次见到字形）约 3.2 µs/字形（17 DIP、DPR 2、CJK），
@@ -91,6 +94,21 @@ go run ./cmd/layx-shot -font book.ttf -text chapter.txt -page 0 -out page.png
 - **对齐坐标**：side bearing 与基线都来自 `paint.Glyph`，不会重新 shaping 字符串。
 - **不拥有字体**：只读取 `paint.Font.Data`，按「地址 + 长度 + 面索引」解析并缓存。
 - **确定性**：相同显示列表、相同字体、相同坐标得到逐字节相同的像素。
+
+## 和平台光栅器比
+
+`reference/freetype/` 里有三个 C 文件，用 FreeType 的灰度光栅器把同一份工作做一遍
+（同字体、同字号、同位置），只当尺子，不参与构建。2026-10-26，amd64、Go 1.24、
+FreeType 2.13.2、wqy-microhei、34 px（17 DIP @ DPR 2）、《阿Q正傳》第 5 页：
+
+| | 每字形冷栅格 | 同一页（474 字形） | 与 16×16 点采样真值的平均误差 | 墨量/真值 |
+| --- | ---: | ---: | ---: | ---: |
+| layx-raster | **3.4 µs** | **1.9 ms**（含纸面与墨色修正） | **0.085/255** | 1.0022 |
+| FreeType | 5.0 µs | 3.3–3.6 ms（只有栅格与混合） | 0.122/255 | 1.0049 |
+
+误差更小不是调出来的：精确面积积分对的是面积，FreeType 的灰度光栅器是 4×4 子采样。
+`TestGlyphFidelity` 把这件事钉在 CI 里（DejaVu Serif，34 px，误差 < 0.35/255、
+墨量 ±1%），无需 C 工具链。复现步骤见 `reference/freetype/README.md`。
 
 ## 边界与取舍
 
@@ -117,6 +135,7 @@ layx-raster/
   glyph.go        字体解析缓存、轮廓缓存、字形路径、合成粗体
   image.go        DrawImage 的逆映射与双线性采样
   cmd/layx-shot   文本 → 文档 → 一页 PNG 的最小示例
+  reference/      与平台光栅器（FreeType）对照用的 C 工具，不参与构建
   testdata/       DejaVu Serif（测试字体，Bitstream Vera 许可，见 testdata/DejaVu-LICENSE.txt）
 ```
 
@@ -132,7 +151,11 @@ go run ./cmd/layx-shot -font testdata/DejaVuSerif.ttf -out /tmp/page.png
 
 # 覆盖率：与 16x16 点采样的暴力对照，以及字形大小的路径开销
 go test -run TestCoverage -v .
+go test -run TestGlyphFidelity -v .
 go test -run XXX -bench 'BenchmarkCoverageGlyph|BenchmarkDrawGlyphs' -benchtime 2s .
+
+# 与 FreeType 比（可选，需要 C 工具链，见 reference/freetype/README.md）
+go test -run XXX -bench BenchmarkGlyphRasterizer -benchtime 2s .
 ```
 
 测试覆盖：矩形/α 混合/半像素覆盖、覆盖率与点采样的暴力对照（三角形、洞、圆）、
