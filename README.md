@@ -76,7 +76,7 @@ go run ./cmd/layx-shot -font book.ttf -text chapter.txt -page 0 -out page.png
 - **工作量与路径成正比**：只有边真正穿过的行才会被写；像素循环每行一次。
 - **字形图集**：`Coverage` 逐字形输出覆盖率，`layx-reader` 的图集把结果存进纹理；
   那是屏幕和离屏（PNG）共用的同一个光栅器，所以屏幕上的一页和导出的 PNG 是同一批
-  像素。冷栅格（每页第一次见到字形）约 3.3 µs/字形（17 DIP、DPR 2、CJK），
+  像素。冷栅格（每页第一次见到字形）约 3.2 µs/字形（17 DIP、DPR 2、CJK），
   暖帧只查表，不受影响。
 - **合成粗体**：`GlyphRun.EmulateBold` 时沿文字自身 x 轴再画一遍（不改变布局）。
 - **对齐坐标**：side bearing 与基线都来自 `paint.Glyph`，不会重新 shaping 字符串。
