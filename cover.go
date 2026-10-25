@@ -79,7 +79,11 @@ type coverageScratch struct {
 // The work is proportional to the rows each edge crosses plus the surface once,
 // not to the rows times the surface: a glyph's hundreds of edges touch only a
 // few rows each.
-func rasterizeCoverage(edges []edge, area pixArea, s *coverageScratch) []uint8 {
+//
+// tone, when not nil, corrects each pixel's coverage on the way out (see Tone):
+// the ink's weight is decided once per glyph instead of by a pass over the
+// finished bitmap.
+func rasterizeCoverage(edges []edge, area pixArea, s *coverageScratch, tone *Tone) []uint8 {
 	width, height := area.width(), area.height()
 	n := width * height
 	if n <= 0 {
@@ -141,7 +145,11 @@ func rasterizeCoverage(edges []edge, area pixArea, s *coverageScratch) []uint8 {
 	// One row of this shape is the winding at each pixel's left edge, so the
 	// row's cells are summed in place. Converting to bytes here, rather than
 	// into a float coverage buffer for the caller to walk again, is one pass
-	// over the pixels instead of two.
+	// over the pixels instead of two, and the tone rides along in the same pass.
+	var lut *[256]uint8
+	if tone != nil {
+		lut = &tone.lut
+	}
 	for row := 0; row < height; row++ {
 		line := cells[row*stride : row*stride+stride]
 		out := alpha[row*width : row*width+width]
@@ -155,7 +163,11 @@ func rasterizeCoverage(edges []edge, area pixArea, s *coverageScratch) []uint8 {
 			if a > 255 {
 				a = 255
 			}
-			out[x] = uint8(a + 0.5)
+			v := uint8(a + 0.5)
+			if lut != nil {
+				v = lut[v]
+			}
+			out[x] = v
 		}
 	}
 	return alpha
@@ -250,14 +262,15 @@ func (r *Rasterizer) edgesFor(s *shape) []edge {
 	return r.edges
 }
 
-// coverage rasterizes edges into the rasterizer's scratch slice.
-func (r *Rasterizer) coverage(edges []edge, area pixArea) []uint8 {
-	return rasterizeCoverage(edges, area, &r.scratch)
+// coverage rasterizes edges into the rasterizer's scratch slice, corrected for
+// the ink's tone when tone is not nil.
+func (r *Rasterizer) coverage(edges []edge, area pixArea, tone *Tone) []uint8 {
+	return rasterizeCoverage(edges, area, &r.scratch, tone)
 }
 
 // fillShape rasterizes s with the non-zero winding rule and blends it into the
 // surface through the current clip.
-func (r *Rasterizer) fillShape(s *shape, c paint.Color) {
+func (r *Rasterizer) fillShape(s *shape, c paint.Color, tone *Tone) {
 	if c.A == 0 || len(s.starts) == 0 {
 		return
 	}
@@ -269,7 +282,7 @@ func (r *Rasterizer) fillShape(s *shape, c paint.Color) {
 	if area.empty() {
 		return
 	}
-	r.blendCoverage(area, r.coverage(r.edgesFor(s), area), c)
+	r.blendCoverage(area, r.coverage(r.edgesFor(s), area, tone), c)
 }
 
 // fillDeviceRect fills an axis-aligned device rectangle with exact per-pixel

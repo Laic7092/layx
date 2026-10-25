@@ -47,7 +47,7 @@ func (r *Rasterizer) ClipRect(rc paint.Rect) {
 
 	var s shape
 	addQuadShape(&s, q)
-	cov := r.coverage(r.edgesFor(&s), area)
+	cov := r.coverage(r.edgesFor(&s), area, nil)
 
 	mask := make([]uint8, r.w*r.h)
 	old := r.state.clip.mask

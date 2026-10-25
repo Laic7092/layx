@@ -17,6 +17,7 @@ type Coverage struct {
 	shape   shape
 	edges   []edge
 	scratch coverageScratch
+	tone    *Tone
 }
 
 // NewCoverage returns an empty coverage rasterizer. Reset sizes it before the
@@ -70,6 +71,12 @@ func (c *Coverage) CubeTo(c1x, c1y, c2x, c2y, x, y float32) {
 	flattenCube(&c.shape, cur, point{c1x, c1y}, point{c2x, c2y}, point{x, y}, 0)
 }
 
+// SetTone corrects the coverage Alpha returns with t, so a host's own glyph
+// atlas prints the same ink weight DrawGlyphs does. A nil tone draws the
+// outlines' own coverage. The setting is kept across Reset; a host that caches
+// bitmaps per ink sets it before each Alpha.
+func (c *Coverage) SetTone(t *Tone) { c.tone = t }
+
 // ClosePath closes the current contour. Every contour is closed when Alpha
 // runs anyway, so this exists for callers written against a path rasterizer
 // that needs the explicit call.
@@ -83,5 +90,5 @@ func (c *Coverage) Alpha() []uint8 {
 		return nil
 	}
 	c.edges = shapeEdges(&c.shape, c.edges[:0])
-	return rasterizeCoverage(c.edges, pixArea{X0: 0, Y0: 0, X1: c.w, Y1: c.h}, &c.scratch)
+	return rasterizeCoverage(c.edges, pixArea{X0: 0, Y0: 0, X1: c.w, Y1: c.h}, &c.scratch, c.tone)
 }

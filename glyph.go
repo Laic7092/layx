@@ -110,6 +110,12 @@ func (r *Rasterizer) DrawGlyphs(run paint.GlyphRun) {
 	}
 	key, _ := keyOf(run.Font)
 	scale := run.Size / upem
+	// The ink's correction, once for the run: it depends on the colour and the
+	// band of sizes, not on the glyph.
+	var tone *Tone
+	if r.ToneFor != nil {
+		tone = r.ToneFor(run)
+	}
 
 	s := &r.path
 	for i := range run.Glyphs {
@@ -129,7 +135,7 @@ func (r *Rasterizer) DrawGlyphs(run paint.GlyphRun) {
 		if len(s.starts) == 0 {
 			continue
 		}
-		r.fillShape(s, run.Color)
+		r.fillShape(s, run.Color, tone)
 
 		if run.EmulateBold {
 			// The core only flags that the matched face is not bold; faking it
@@ -148,7 +154,7 @@ func (r *Rasterizer) DrawGlyphs(run paint.GlyphRun) {
 				s.pts[j].X += ddx
 				s.pts[j].Y += ddy
 			}
-			r.fillShape(s, run.Color)
+			r.fillShape(s, run.Color, tone)
 		}
 	}
 }

@@ -63,6 +63,9 @@ go run ./cmd/layx-shot -font book.ttf -text chapter.txt -page 0 -out page.png
 | --- | --- |
 | `NewCoverage` / `Reset` | 一块可复用的设备空间覆盖率缓冲，画路径、取 8 位 alpha |
 | `Coverage.MoveTo/LineTo/QuadTo/CubeTo/Alpha` | 非零环绕、隐式闭合；`layx-reader` 的字形图集用它，逐字形栅格化一次 |
+| `NewTone` / `Tone.Coverage` / `Tone.Apply` | 墨色修正表：系统文字打印机给字形覆盖率加的那层对比度与字干增粗 |
+| `Coverage.SetTone` | 让 `Alpha` 在写出的同时应用修正；图集与整页出图用同一张表 |
+| `Rasterizer.ToneFor` | 宿主按 run（墨色、字号、是否合成粗体）提供修正，`DrawGlyphs` 逐 run 应用 |
 
 `Coverage` 是 `Rasterizer` 内部填充字形与矢量形状的同一套积分器（精确面积、非零
 环绕），只是少了整页状态与混合。需要自己的图集/字形缓存、或只想要一张 alpha mask
@@ -78,7 +81,13 @@ go run ./cmd/layx-shot -font book.ttf -text chapter.txt -page 0 -out page.png
   那是屏幕和离屏（PNG）共用的同一个光栅器，所以屏幕上的一页和导出的 PNG 是同一批
   像素。冷栅格（每页第一次见到字形）约 3.2 µs/字形（17 DIP、DPR 2、CJK），
   暖帧只查表，不受影响。
+- **墨色修正**：几何光栅器只画轮廓，系统打印机还会加两层——随墨色变深的对比度
+  （DirectWrite 的 grayscale）和字干边缘的生长（CoreText 的 font smoothing、
+  FreeType 的轻度 stem darkening）。`Tone` 是这条曲线的唯一实现：`DrawGlyphs` 通过
+  宿主给的 `ToneFor` 用它，宿主的自建图集通过 `Coverage.SetTone` 用它，所以屏幕上
+  一页和导出的 PNG 墨量一致（实测差 1%），而关掉它整页会轻 12–14%。
 - **合成粗体**：`GlyphRun.EmulateBold` 时沿文字自身 x 轴再画一遍（不改变布局）。
+  合成粗体的 run 应取"只有对比度、没有生长"的那张表（`ToneOptions.SyntheticBold`）。
 - **对齐坐标**：side bearing 与基线都来自 `paint.Glyph`，不会重新 shaping 字符串。
 - **不拥有字体**：只读取 `paint.Font.Data`，按「地址 + 长度 + 面索引」解析并缓存。
 - **确定性**：相同显示列表、相同字体、相同坐标得到逐字节相同的像素。

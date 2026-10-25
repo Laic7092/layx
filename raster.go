@@ -45,6 +45,16 @@ type Rasterizer struct {
 	scratch coverageScratch
 	edges   []edge
 	path    shape
+
+	// ToneFor, when set, supplies the ink correction for a glyph run: the
+	// coverage of each glyph is mapped through it before it is blended, so the
+	// text is printed with the weight a system printer gives it (see Tone). nil
+	// draws the outlines' own coverage.
+	//
+	// The host owns the policy — which ink, which band of sizes, whether the run
+	// is a synthetic bold — and returns the same Tone for every run that shares
+	// them; building one per run is a table of 256 and answers for the whole run.
+	ToneFor func(run paint.GlyphRun) *Tone
 }
 
 type state struct {
@@ -170,7 +180,7 @@ func (r *Rasterizer) FillRect(rc paint.Rect, c paint.Color) {
 	}
 	var s shape
 	addQuadShape(&s, q)
-	r.fillShape(&s, c)
+	r.fillShape(&s, c, nil)
 }
 
 // StrokeRect implements paint.Painter. The stroke is centered on the rectangle
@@ -206,7 +216,7 @@ func (r *Rasterizer) StrokeRect(rc paint.Rect, c paint.Color, width float32) {
 		}
 		s.addShape(&hole)
 	}
-	r.fillShape(&s, c)
+	r.fillShape(&s, c, nil)
 }
 
 // FillRoundRect implements paint.Painter. The radius is clamped to half the
@@ -226,5 +236,5 @@ func (r *Rasterizer) FillRoundRect(rc paint.Rect, radius float32, c paint.Color)
 		return apply(r.state.m, point{x, y})
 	})
 	addRoundRect(b, rc, radius)
-	r.fillShape(&s, c)
+	r.fillShape(&s, c, nil)
 }
