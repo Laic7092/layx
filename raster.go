@@ -42,10 +42,9 @@ type Rasterizer struct {
 	outlines map[outlineKey][]font.Segment
 	images   map[paint.ImageID]image.Image
 
-	cov   []float32
-	edges []edge
-	cross []crossing
-	path  shape
+	scratch coverageScratch
+	edges   []edge
+	path    shape
 }
 
 type state struct {

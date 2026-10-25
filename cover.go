@@ -1,6 +1,10 @@
 package raster
 
-import "github.com/laix/layx/render/paint"
+import (
+	"slices"
+
+	"github.com/laix/layx/render/paint"
+)
 
 // coverageSamples is the number of vertical sub-scanlines per pixel row.
 // Horizontal coverage is analytic, so the total is 8 samples per pixel with
@@ -13,7 +17,13 @@ const coverageSamples = 8
 // consistent signs.
 type edge struct {
 	x0, y0, x1, y1 float32
-	dir            int8
+	// ymin and ymax are y0 and y1 sorted; dxdy is dx/dy, so a scanline's
+	// crossing needs one multiply instead of a division. xc is this edge's x
+	// at the row's middle, filled in per row for the crossing sort.
+	ymin, ymax float32
+	dxdy       float32
+	xc         float32
+	dir        int8
 }
 
 type crossing struct {
@@ -21,10 +31,9 @@ type crossing struct {
 	dir int8
 }
 
-// edgesFor flattens every contour of s into edges, reusing the rasterizer's
-// scratch slice.
-func (r *Rasterizer) edgesFor(s *shape) []edge {
-	edges := r.edges[:0]
+// shapeEdges flattens every contour of s into edges. Horizontal edges are
+// skipped: a scanline never crosses one.
+func shapeEdges(s *shape, edges []edge) []edge {
 	for i := range s.starts {
 		start, end := s.contourRange(i)
 		if end-start < 3 {
@@ -37,60 +46,126 @@ func (r *Rasterizer) edgesFor(s *shape) []edge {
 			}
 			a, b := s.pts[j], s.pts[k]
 			if a.Y == b.Y || !finitePoint(a) || !finitePoint(b) {
-				continue // horizontal edges never cross a scanline
+				continue
 			}
 			e := edge{x0: a.X, y0: a.Y, x1: b.X, y1: b.Y, dir: 1}
 			if b.Y < a.Y {
 				e.dir = -1
 			}
+			e.ymin, e.ymax = a.Y, b.Y
+			if e.ymin > e.ymax {
+				e.ymin, e.ymax = e.ymax, e.ymin
+			}
+			e.dxdy = (b.X - a.X) / (b.Y - a.Y)
 			edges = append(edges, e)
 		}
 	}
-	r.edges = edges
 	return edges
 }
 
-// coverage returns the fraction of each pixel in area covered by the non-zero
-// winding of edges, one value per pixel in row-major order.
-func (r *Rasterizer) coverage(edges []edge, area pixArea) []float32 {
+// coverageScratch is the reusable working set of one rasterizer. Keeping it in
+// one struct lets the active list and the crossings keep their capacity from
+// one fill to the next.
+type coverageScratch struct {
+	cov    []float32
+	active []edge
+	cross  []crossing
+}
+
+// rasterizeCoverage fills s.cov with the fraction of each pixel in area
+// covered by the non-zero winding of edges, one value per pixel in row-major
+// order.
+//
+// Each pixel row is sampled at coverageSamples sub-scanlines; horizontal
+// coverage is exact for each span. An active edge list keeps the work
+// proportional to the edges that reach the row (a glyph has hundreds of edges
+// but only a few cross any one scanline), and the crossings are sorted once per
+// row, by the row's middle, instead of once per sub-scanline: within a pixel
+// row the outline almost never crosses itself, so the order holds for every
+// sample and each sample only drops the edges that do not reach it.
+func rasterizeCoverage(edges []edge, area pixArea, s *coverageScratch) {
 	n := area.width() * area.height()
-	if cap(r.cov) < n {
-		r.cov = make([]float32, n)
+	if cap(s.cov) < n {
+		s.cov = make([]float32, n)
 	}
-	cov := r.cov[:n]
-	for i := range cov {
-		cov[i] = 0
+	s.cov = s.cov[:n]
+	for i := range s.cov {
+		s.cov[i] = 0
 	}
+	s.active = s.active[:0]
 	if len(edges) == 0 {
-		return cov
+		return
 	}
+
+	slices.SortFunc(edges, func(a, b edge) int {
+		switch {
+		case a.ymin < b.ymin:
+			return -1
+		case a.ymin > b.ymin:
+			return 1
+		}
+		return 0
+	})
 
 	const weight = 1 / float32(coverageSamples)
 	width := area.width()
-	cross := r.cross[:0]
+	next := 0
+	cross := s.cross[:0]
 
 	for row := area.Y0; row < area.Y1; row++ {
-		rowOff := (row - area.Y0) * width
-		rowCov := cov[rowOff : rowOff+width]
-		for sample := 0; sample < coverageSamples; sample++ {
-			y := float32(row) + (float32(sample)+0.5)*weight
-			cross = cross[:0]
-			for i := range edges {
-				e := &edges[i]
-				y0, y1 := e.y0, e.y1
-				if y0 > y1 {
-					y0, y1 = y1, y0
+		top := float32(row)
+		bottom := top + 1
+		for next < len(edges) && edges[next].ymin < bottom {
+			s.active = append(s.active, edges[next])
+			next++
+		}
+		if len(s.active) > 0 {
+			kept := 0
+			for _, e := range s.active {
+				if e.ymax > top {
+					s.active[kept] = e
+					kept++
 				}
-				if y < y0 || y >= y1 {
+			}
+			s.active = s.active[:kept]
+		}
+		if len(s.active) < 2 {
+			continue
+		}
+
+		mid := top + 0.5
+		for i := range s.active {
+			e := &s.active[i]
+			e.xc = e.x0 + (mid-e.y0)*e.dxdy
+		}
+		sortActiveByX(s.active)
+
+		rowCov := s.cov[(row-area.Y0)*width : (row-area.Y0)*width+width]
+		for sample := 0; sample < coverageSamples; sample++ {
+			y := top + (float32(sample)+0.5)*weight
+			cross = cross[:0]
+			for i := range s.active {
+				e := &s.active[i]
+				if y < e.ymin || y >= e.ymax {
 					continue
 				}
-				x := e.x0 + (y-e.y0)*(e.x1-e.x0)/(e.y1-e.y0)
-				cross = append(cross, crossing{x: x, dir: e.dir})
+				cross = append(cross, crossing{x: e.x0 + (y-e.y0)*e.dxdy, dir: e.dir})
 			}
 			if len(cross) < 2 {
 				continue
 			}
-			sortCrossings(cross)
+			// The row's order holds unless the outline crosses itself inside
+			// this row; check instead of trusting, and fix it if it does not.
+			sorted := true
+			for i := 1; i < len(cross); i++ {
+				if cross[i].x < cross[i-1].x {
+					sorted = false
+					break
+				}
+			}
+			if !sorted {
+				sortCrossings(cross)
+			}
 			wind := 0
 			for i := 0; i+1 < len(cross); i++ {
 				wind += int(cross[i].dir)
@@ -101,8 +176,31 @@ func (r *Rasterizer) coverage(edges []edge, area pixArea) []float32 {
 			}
 		}
 	}
-	r.cross = cross[:0]
-	return cov
+	s.cross = cross[:0]
+}
+
+func sortActiveByX(active []edge) {
+	for i := 1; i < len(active); i++ {
+		e := active[i]
+		j := i - 1
+		for j >= 0 && active[j].xc > e.xc {
+			active[j+1] = active[j]
+			j--
+		}
+		active[j+1] = e
+	}
+}
+
+// edgesFor flattens s into the rasterizer's scratch slice.
+func (r *Rasterizer) edgesFor(s *shape) []edge {
+	r.edges = shapeEdges(s, r.edges[:0])
+	return r.edges
+}
+
+// coverage rasterizes edges into the rasterizer's scratch slice.
+func (r *Rasterizer) coverage(edges []edge, area pixArea) []float32 {
+	rasterizeCoverage(edges, area, &r.scratch)
+	return r.scratch.cov[:area.width()*area.height()]
 }
 
 func sortCrossings(xs []crossing) {

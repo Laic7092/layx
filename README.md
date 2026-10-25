@@ -57,9 +57,23 @@ go run ./cmd/layx-shot -font book.ttf -text chapter.txt -page 0 -out page.png
 | `DrawGlyphs` | 直接从字体轮廓（`paint.Font.Data`）栅格化；按面/字形缓存轮廓 |
 | `Clipped.Visible` | 把当前裁剪框反变换回用户空间，带 1px 余量，供 layx 剔除不可见 op |
 
+低层接口：
+
+| API | 说明 |
+| --- | --- |
+| `NewCoverage` / `Reset` | 一块可复用的设备空间覆盖率缓冲，画路径、取 8 位 alpha |
+| `Coverage.MoveTo/LineTo/QuadTo/CubeTo/Alpha` | 非零环绕、隐式闭合；`layx-reader` 的字形图集用它，逐字形栅格化一次 |
+
+`Coverage` 是 `Rasterizer` 内部填充字形与矢量形状的同一套扫描线（8 条竖向子采样 +
+水平解析面积、活动边表），只是少了整页状态与混合。需要自己的图集/字形缓存、或只想
+要一张 alpha mask 的宿主直接用它，不必实现 `paint.Painter`。
+
 其他行为：
 
 - **抗锯齿**：8 条竖向子扫描线 + 水平解析覆盖率；不依赖平台字体光栅器。
+- **字形图集**：`Coverage` 逐字形输出覆盖率，`layx-reader` 的图集把结果存进纹理；
+  冷栅格（每页第一次见到字形）比 `golang.org/x/image/vector` 慢约一个数量级，
+  暖帧不受影响。该读者默认用它，`LAYX_GLYPH_RASTER=vector` 可回退。
 - **合成粗体**：`GlyphRun.EmulateBold` 时沿文字自身 x 轴再画一遍（不改变布局）。
 - **对齐坐标**：side bearing 与基线都来自 `paint.Glyph`，不会重新 shaping 字符串。
 - **不拥有字体**：只读取 `paint.Font.Data`，按「地址 + 长度 + 面索引」解析并缓存。
@@ -75,7 +89,8 @@ go run ./cmd/layx-shot -font book.ttf -text chapter.txt -page 0 -out page.png
 - 一个 `Rasterizer` 不是并发安全的；每个 goroutine 用自己的实例。
 - 裁剪掩码按整个表面分配（页面尺寸）。这是离线渲染/快照的取舍；实时大画布应改用
   tile 加局部表面。
-- 没有路径 API：`paint.Painter` 是唯一入口，本包不会变成通用 2D 绘图库。
+- 除了 `Coverage` 的字形级覆盖率，不提供通用路径/画布 API；`paint.Painter` 仍是
+  整页绘制的唯一入口，本包不会变成通用 2D 绘图库。
 
 ## 包结构
 
@@ -84,7 +99,8 @@ layx-raster/
   raster.go       Rasterizer、表面、状态栈、矩形/描边/圆角填充
   clip.go         裁剪的快速路径与覆盖率掩码，Visible
   geometry.go     仿射、box→device、扁平化（二次/三次贝塞尔）、shape
-  cover.go        边界表、竖向子采样、水平面积累积、混合
+  coverage.go     字形级覆盖率 API（Coverage）：路径、8 位 alpha、可复用
+  cover.go        活动边表、竖向子采样、水平面积累积、混合
   glyph.go        字体解析缓存、轮廓缓存、字形路径、合成粗体
   image.go        DrawImage 的逆映射与双线性采样
   cmd/layx-shot   文本 → 文档 → 一页 PNG 的最小示例
