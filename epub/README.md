@@ -57,11 +57,11 @@ module github.com/laix/layx/epub
   节点上，命中矩形不覆盖后续块。
 - 真正的表格网格：列宽、`rowspan`/`colspan`、表头跨页重复、列对齐。
   `render` 的 IR 只有 block/inline/text/image/break，没有网格模型，
-  `layx/docs/design.md` 第 62 行明确说表格要先扩 IR（“列组、跨行列，
+  `layx/docs/design.md` 的「会破坏当前结构的能力」一节明确说表格要先扩 IR（“列组、跨行列，
   本质是网格 + 约束求解”）。本 module 只做线性化，不谎报结构；
   `colgroup`/`col`、`colspan` 被忽略但单元格文本保留。
-- ruby（`<ruby>`/`<rt>`）、竖排、脚注。出处：`layx/docs/design.md` 第 64 行、
-  `layx/README.md` 已知限制、`layx-reader/README.md`“没有脚注、竖排、ruby”。
+- ruby（`<ruby>`/`<rt>`）、竖排、脚注。出处：`layx/docs/design.md`「会破坏当前结构的能力」的
+  ruby/竖排一条、`layx/README.md` 已知限制、`layx-reader/README.md`“没有脚注、竖排、ruby”。
 - MathML、音频 / 视频、字体文件、DRM：没有专门的文档清单，是从代码行为
   推的——`html.go` 的 `skippedTags` 含 `math`，`book.go` 只收
   `media-type` 以 `image/` 开头的资源，manifest 里的字体/音视频不会进

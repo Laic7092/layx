@@ -102,12 +102,38 @@
 - 预设放在文档或 `examples/` 里，不进核心。
 - 好处：预设可以随审美演进、可以由社区贡献多个，核心保持中立。
 
+## 中文正文的推荐开关组
+
+做中文正文时，README 的快速开始只给了最小可跑的组合；下面是完整的建议值。
+
+```go
+Typography: render.Typography{
+    FontFamily: "serif",
+    FontSize:   18,
+    LineHeight: 1.6,
+    Color:      paint.Color{A: 0xff},
+    Rules: render.TextRules{
+        PunctuationCompression: true,  // 成对引号收半宽，与 Chrome 默认逐行一致
+        HangingPunctuation:     false, // 行末标点探出；浏览器默认不悬挂，默认关
+        Autospacing:            false, // 中西文 1/8 em；Chrome 不加，混排想对齐浏览器就关
+        Widows:                 2,     // CSS 初始值；要填满整页就写 1
+        Orphans:                2,     // 同上，1 是最小合法值
+    },
+},
+// 首行缩进属于文档样式，不在 Typography 上：
+Style{FontSize: 18, FirstLineIndent: 36, TextAlign: render.AlignJustify},
+```
+
+零值一律是规范初始值（标点类默认关闭，孤行/寡行按 CSS 初始值 2/2 打开），所以
+“什么都不设”与“跟上面这块一样”不是一回事；中文排版的观感差异主要来自这里，而不是
+引擎的默认行为。
+
 ## 默认全关的代价
 
 开箱即用的中文排版会比浏览器"看起来差一点"：标点不挤压、没有孤行保护、中西
 文之间不加间距。这是**正确性的代价**，需要接受，并用文档补上：
 
-- README 的「中文正文的推荐开关组」给出代码块；
+- 本文下面的「中文正文的推荐开关组」给出代码块；
 - 用文档承担审美，而不是用默认值承担。
 
 ## 开关只调参数，不换模型
@@ -138,8 +164,8 @@
 
 ## 当前实现
 
-上表的四个决策与两两个可选政策（`PunctuationCompression`、
-`HangingPunctuation`）均已实现，零值均为规范默认（即关闭）。
+上表的四个决策与两个可选政策（`PunctuationCompression`、
+`HangingPunctuation`，另有 `Autospacing`）均已实现，零值均为规范默认（即关闭）。
 
 - 孤行/寡行、`Autospacing`、`TextRules` 整体哈希进 `BreakKey`，都带穷举/反向测试
   （`render/keys_test.go`）。
