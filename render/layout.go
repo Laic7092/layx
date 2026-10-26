@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"sort"
 	"sync"
-	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -164,7 +163,13 @@ type Layout struct {
 	// paintKey combines all PageKeys with the theme.
 	paintKey keyHash
 
+	// pool is this Layout's worker pool: the Engine's cache entry for its font
+	// set, shared with every other layout of the same fonts. Workers are leased
+	// per page, tile or paragraph, never held for the layout's lifetime, so a
+	// Layout needs no shutdown.
 	pool *sync.Pool
+	// lang is the document's default language, resolved once per layout.
+	lang language.Language
 
 	// lineCache is Layout-scoped: it dies with the variant, so evicting a
 	// BreakKey/PageKey variant also releases its shaped lines. It is bounded
@@ -226,26 +231,24 @@ func (e *Engine) layoutDoc(ctx context.Context, doc *Document, opts LayoutOption
 	defaultLang := language.NewLanguage(doc.meta.Language)
 
 	// Pass 1: derive the three keys. Hashing walks the document but does no
-	// shaping, so it is cheap even for a 5M-rune book.
+	// shaping, so it is cheap even for a 5M-rune book. Chapters are independent,
+	// so the pass is parallel: each task builds a keyer from the cache's seeds,
+	// and the digests are identical to a sequential pass.
 	keyStart := e.mark()
-	keyer := variants.newKeyer()
 	contentH := contentHeight(opts)
 	breakKeys := make([]keyHash, nch)
 	pageKeys := make([]keyHash, nch)
-	for ci := 0; ci < nch; ci++ {
-		if ci%32 == 0 {
-			if err := ctx.Err(); err != nil {
-				return nil, err
-			}
-		}
+	seedA, seedB := variants.seeds()
+	e.parallelFor(ctx, nch, func(ci int) {
+		k := &keyer{seedA: seedA, seedB: seedB}
 		ch := &doc.chapters[ci]
-		breakKeys[ci] = chapterBreakKey(keyer, doc, ch, opts, typo)
-		pageKeys[ci] = pageKey(keyer, breakKeys[ci], typo, contentH)
-	}
+		breakKeys[ci] = chapterBreakKey(k, doc, ch, opts, typo)
+		pageKeys[ci] = pageKey(k, breakKeys[ci], typo, contentH)
+	})
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	currentPaintKey := paintKey(keyer, pageKeys, typo)
+	currentPaintKey := paintKey(variants.newKeyer(), pageKeys, typo)
 	e.stop(keyStart, &e.stats.keys)
 
 	// Pass 2: find cached line boxes. Only chapters whose BreakKey is absent
@@ -264,115 +267,89 @@ func (e *Engine) layoutDoc(ctx context.Context, doc *Document, opts LayoutOption
 		}
 	}
 
-	pool := e.newWorkerPool(opts, doc)
+	pool := e.workerPool(opts.Fonts)
 
 	if anyBreak {
-		explicit := make([]map[NodeID]float32, nch)
-		for ci := range doc.chapters {
-			if needBreak[ci] {
-				explicit[ci] = explicitLineHeights(doc, &doc.chapters[ci])
+		// Phase A: plan each chapter. Planning resolves inherited styles and
+		// tokenizes inline runs but shapes nothing, so it is cheap and its result
+		// is a flat list of paragraphs to break.
+		plans := make([]*chapterPlan, nch)
+		planErrs := make([]error, nch)
+		e.parallelFor(ctx, nch, func(ci int) {
+			if !needBreak[ci] {
+				return
 			}
-		}
-		plans, tasks, err := buildTasks(doc, opts, typo, defaultLang, needBreak)
-		if err != nil {
-			return nil, err
-		}
-
-		results := make([]*breakBox, len(tasks))
-		errs := make([]error, len(tasks))
-
-		workers := e.workers
-		if workers > len(tasks) {
-			workers = len(tasks)
-		}
-		if workers < 1 && len(tasks) > 0 {
-			workers = 1
-		}
-		var next atomic.Int64
-		var wg sync.WaitGroup
-		for wi := 0; wi < workers; wi++ {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				for {
-					if ctx.Err() != nil {
-						return
-					}
-					idx := int(next.Add(1)) - 1
-					if idx < 0 || idx >= len(tasks) {
-						return
-					}
-					t := &tasks[idx]
-					ch := &doc.chapters[t.chapter]
-					w := pool.Get().(*textWorker)
-					inline := &layoutContext{doc: doc, typo: typo}
-					bc := &breakContext{
-						ctx:         ctx,
-						doc:         doc,
-						typo:        typo,
-						chapter:     *ch,
-						defaultLang: defaultLang,
-						limits:      e.limits,
-						worker:      w,
-						inline:      inline,
-						explicitLH:  explicit[t.chapter],
-					}
-					var (
-						box     *breakBox
-						taskErr error
-					)
-					if t.node >= 0 {
-						box, taskErr = bc.block(ch.Nodes, t.node, t.width, t.rootStyle)
-					} else {
-						box, taskErr = bc.inlineRun(t.tokens, t.style, t.width)
-					}
-					pool.Put(w)
-					if taskErr != nil {
-						errs[idx] = taskErr
-						continue
-					}
-					results[idx] = box
-				}
-			}()
-		}
-		wg.Wait()
+			explicit := explicitLineHeights(doc, &doc.chapters[ci])
+			p, err := planChapter(doc, opts, typo, defaultLang, e.limits, ci, explicit)
+			if err != nil {
+				planErrs[ci] = err
+				return
+			}
+			plans[ci] = p
+		})
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		for i, err := range errs {
+		for _, err := range planErrs {
 			if err != nil {
-				return nil, fmt.Errorf("layout task %d: %w", i, err)
+				return nil, err
 			}
 		}
-		for pi := range plans {
-			plan := &plans[pi]
-			units := make([]breakUnit, 0, len(plan.units))
-			for _, ti := range plan.units {
-				box := results[ti]
-				if box == nil {
-					return nil, fmt.Errorf("%w: chapter %q produced no layout", ErrInvalidDocument, doc.chapters[plan.chapter].ID)
-				}
-				u := unitFromBox(box)
-				if tasks[ti].node < 0 {
+
+		// Phase B: break every paragraph of every chapter from one flat task
+		// list, so the load is balanced by text rather than by document shape.
+		// A book whose whole body is a single block still fills every worker.
+		var tasks []*paraTask
+		for _, p := range plans {
+			if p != nil {
+				tasks = append(tasks, p.tasks...)
+			}
+		}
+		if err := e.breakParagraphs(ctx, pool, tasks, opts, typo, defaultLang); err != nil {
+			return nil, err
+		}
+
+		// Phase C: put the lines back into the plan's unit tree, in document
+		// order, and publish the chapter.
+		for ci, plan := range plans {
+			if plan == nil {
+				continue
+			}
+			units := make([]breakUnit, 0, len(plan.boxes))
+			next := 0
+			for bi := range plan.boxes {
+				pb := &plan.boxes[bi]
+				next = attachLines(pb.box.units, plan.tasks, next)
+				u := unitFromBox(pb.box)
+				if pb.inline {
 					// A top-level inline task is not a block of its own: its box
 					// is the chapter root. layChapter emits that root's border and
 					// background once around the whole flow, so the wrapper must
 					// not paint or re-apply root border offsets.
-					cp := *box
+					cp := *pb.box
 					cp.style = Style{}
 					u.box = &cp
 				}
 				units = append(units, u)
 			}
-			bc := &breakChapter{key: breakKeys[plan.chapter], units: units}
-			breaks[plan.chapter] = bc
-			variants.putBreak(cacheKey{chapter: plan.chapter, fonts: opts.Fonts, key: breakKeys[plan.chapter]}, bc)
+			if next != len(plan.tasks) {
+				// The attach pass is the one place where a plan and its unit tree
+				// must agree; a mismatch would silently drop lines, so report it.
+				return nil, fmt.Errorf("%w: chapter %q attached %d of %d paragraphs",
+					ErrInvalidDocument, doc.chapters[ci].ID, next, len(plan.tasks))
+			}
+			units = pruneUnits(units)
+			bc := &breakChapter{key: breakKeys[ci], units: units}
+			breaks[ci] = bc
+			variants.putBreak(cacheKey{chapter: ci, fonts: opts.Fonts, key: breakKeys[ci]}, bc)
 		}
 	}
 	e.stop(breakStart, &e.stats.brk)
 
 	// Pass 3: reuse complete page maps when PageKey is unchanged, otherwise
-	// re-stack the cached line boxes and re-paginate.
+	// re-stack the cached line boxes and re-paginate. Chapters are independent
+	// (each paginates from its own top), so this is parallel too; the page
+	// numbering is stitched together in order below.
 	laid := make([]*chapterFlow, nch)
 	needPage := make([]bool, nch)
 	for ci := 0; ci < nch; ci++ {
@@ -383,22 +360,33 @@ func (e *Engine) layoutDoc(ctx context.Context, doc *Document, opts LayoutOption
 			needPage[ci] = true
 		}
 	}
-	for ci := 0; ci < nch; ci++ {
+	pageErrs := make([]error, nch)
+	e.parallelFor(ctx, nch, func(ci int) {
 		if !needPage[ci] {
-			continue
-		}
-		if err := ctx.Err(); err != nil {
-			return nil, err
+			return
 		}
 		ch := &doc.chapters[ci]
 		root := &ch.Nodes[ch.Root]
 		rootStyle := resolveStyle(doc.style(root.Style), typo)
 		lc, err := e.layChapter(ctx, ch, ci, breaks[ci], rootStyle, typo, contentH, contentWidth(opts))
 		if err != nil {
-			return nil, err
+			pageErrs[ci] = err
+			return
 		}
 		laid[ci] = lc
-		variants.putPage(cacheKey{chapter: ci, fonts: opts.Fonts, key: pageKeys[ci]}, lc)
+	})
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	for _, err := range pageErrs {
+		if err != nil {
+			return nil, err
+		}
+	}
+	for ci := 0; ci < nch; ci++ {
+		if needPage[ci] {
+			variants.putPage(cacheKey{chapter: ci, fonts: opts.Fonts, key: pageKeys[ci]}, laid[ci])
+		}
 	}
 
 	asmStart := e.mark()
@@ -414,6 +402,7 @@ func (e *Engine) layoutDoc(ctx context.Context, doc *Document, opts LayoutOption
 		pageKeys:  pageKeys,
 		paintKey:  currentPaintKey,
 		lineCache: newLineCache(e.lineCache),
+		lang:      defaultLang,
 	}
 	l.chapters = make([]chapterFlow, nch)
 	for ci := 0; ci < nch; ci++ {
@@ -460,6 +449,9 @@ func (e *Engine) layChapter(
 	contentH float32,
 	availW float32,
 ) (*chapterFlow, error) {
+	if bc == nil {
+		return nil, fmt.Errorf("%w: chapter %q has no break result", ErrInvalidDocument, ch.ID)
+	}
 	stackStart := e.mark()
 	bt, _, bb, bl := borderWidths(rootStyle)
 	xShift := rootStyle.MarginLeft + bl
@@ -496,78 +488,190 @@ func (e *Engine) layChapter(
 	return lc, nil
 }
 
-type layoutTask struct {
-	chapter int
-	// node >= 0 means a block subtree; node < 0 means an inline token run.
-	node      NodeID
-	tokens    []inlineToken
-	style     Style
-	rootStyle Style
-	width     float32
+// paraTask is one paragraph waiting for shaping. The plan phase resolves its
+// style and width; the break phase fills lines; nothing else is written. A
+// paragraph is independent of every other paragraph by construction, which is
+// what makes it the right unit of parallel work.
+type paraTask struct {
+	para  *paragraph
+	width float32
+	style Style
+	// lines is the break result, in the compact form the flow stores.
+	lines []lineBreak
 }
 
-type layoutPlan struct {
-	chapter   int
-	rootStyle Style
-	units     []int
+// setLines stores a paragraph's line boxes in the compact form the flow uses.
+func (t *paraTask) setLines(lines []lineBox) {
+	if len(lines) == 0 {
+		return
+	}
+	t.lines = make([]lineBreak, len(lines))
+	for li := range lines {
+		ln := &lines[li]
+		t.lines[li] = lineBreak{
+			end:            ln.end,
+			width:          ln.width,
+			ascent:         clampF16(ln.ascent),
+			descent:        clampF16(ln.descent),
+			implicitSize:   ln.implicitSize,
+			explicitHeight: ln.explicitHeight,
+		}
+	}
 }
 
-func buildTasks(doc *Document, opts LayoutOptions, typo Typography, defaultLang language.Language, need []bool) ([]layoutPlan, []layoutTask, error) {
-	var (
-		tasks []layoutTask
-		plans []layoutPlan
-	)
-	for ci := range doc.chapters {
-		if need != nil && !need[ci] {
+// planBox is one top-level box of a chapter. inline marks a run the chapter
+// root wrapped directly, which must not paint the root's own box.
+type planBox struct {
+	box    *breakBox
+	inline bool
+}
+
+// chapterPlan is what one chapter needs shaped. It is a pure function of the
+// document and the layout options: it carries no vertical placement and no page
+// geometry, only the unit tree with empty paragraph units and the flat task
+// list that fills them.
+type chapterPlan struct {
+	boxes []planBox
+	tasks []*paraTask
+}
+
+// planChapter resolves styles and tokenizes one chapter without shaping
+// anything. It is the first of the three break phases (plan, break, attach) and
+// its cost is O(nodes), not O(lines), so it never needs to be parallel itself.
+func planChapter(doc *Document, opts LayoutOptions, typo Typography, lang language.Language, limits Limits, ci int, explicit map[NodeID]float32) (*chapterPlan, error) {
+	ch := &doc.chapters[ci]
+	nodes := ch.Nodes
+	root := &nodes[ch.Root]
+	rootStyle := resolveStyle(doc.style(root.Style), typo)
+	_, rootRight, _, rootLeft := borderWidths(rootStyle)
+	width := contentWidth(opts) - rootStyle.MarginLeft - rootStyle.MarginRight - rootLeft - rootRight
+	if width <= 0 {
+		return nil, fmt.Errorf("%w: chapter %q has non-positive content width", ErrInvalidOptions, ch.ID)
+	}
+	plan := &chapterPlan{}
+	lc := &layoutContext{doc: doc, typo: typo}
+	bc := &breakContext{
+		doc:        doc,
+		typo:       typo,
+		limits:     limits,
+		inline:     lc,
+		explicitLH: explicit,
+		plan:       plan,
+	}
+	flushInline := func(toks []inlineToken) error {
+		if len(toks) == 0 {
+			return nil
+		}
+		box, err := bc.inlineRun(toks, rootStyle, width)
+		if err != nil {
+			return err
+		}
+		plan.boxes = append(plan.boxes, planBox{box: box, inline: true})
+		return nil
+	}
+	if root.Kind == NodeInline {
+		var toks []inlineToken
+		if err := lc.flattenInline(nodes, []NodeID{ch.Root}, rootStyle, root.Lang, &toks); err != nil {
+			return nil, err
+		}
+		if err := flushInline(toks); err != nil {
+			return nil, err
+		}
+		return plan, nil
+	}
+	var pending []inlineToken
+	for _, child := range root.Children {
+		if child < 0 || int(child) >= len(nodes) {
+			return nil, fmt.Errorf("%w: child %d out of range", ErrInvalidDocument, child)
+		}
+		cn := &nodes[child]
+		if cn.Kind == NodeBlock {
+			if err := flushInline(pending); err != nil {
+				return nil, err
+			}
+			pending = pending[:0]
+			box, err := bc.block(nodes, child, width, rootStyle)
+			if err != nil {
+				return nil, err
+			}
+			plan.boxes = append(plan.boxes, planBox{box: box})
 			continue
 		}
-		ch := &doc.chapters[ci]
-		nodes := ch.Nodes
-		root := &nodes[ch.Root]
-		rootStyle := resolveStyle(doc.style(root.Style), typo)
-		_, rootRight, _, rootLeft := borderWidths(rootStyle)
-		width := contentWidth(opts) - rootStyle.MarginLeft - rootStyle.MarginRight - rootLeft - rootRight
-		if width <= 0 {
-			return nil, nil, fmt.Errorf("%w: chapter %q has non-positive content width", ErrInvalidOptions, ch.ID)
+		if err := lc.flattenInline(nodes, []NodeID{child}, rootStyle, root.Lang, &pending); err != nil {
+			return nil, err
 		}
-		plan := layoutPlan{chapter: ci, rootStyle: rootStyle}
-		lc := &layoutContext{doc: doc, typo: typo}
-		if root.Kind == NodeInline {
-			var toks []inlineToken
-			if err := lc.flattenInline(nodes, []NodeID{ch.Root}, rootStyle, root.Lang, &toks); err != nil {
-				return nil, nil, err
-			}
-			if len(toks) != 0 {
-				tasks = append(tasks, layoutTask{chapter: ci, node: -1, tokens: toks, style: rootStyle, rootStyle: rootStyle, width: width})
-				plan.units = append(plan.units, len(tasks)-1)
-			}
-		} else {
-			var pending []inlineToken
-			flush := func() {
-				if len(pending) == 0 {
-					return
-				}
-				tasks = append(tasks, layoutTask{chapter: ci, node: -1, tokens: pending, style: rootStyle, rootStyle: rootStyle, width: width})
-				plan.units = append(plan.units, len(tasks)-1)
-				pending = nil
-			}
-			for _, child := range root.Children {
-				cn := &nodes[child]
-				if cn.Kind == NodeBlock {
-					flush()
-					tasks = append(tasks, layoutTask{chapter: ci, node: child, rootStyle: rootStyle, width: width})
-					plan.units = append(plan.units, len(tasks)-1)
-					continue
-				}
-				if err := lc.flattenInline(nodes, []NodeID{child}, rootStyle, root.Lang, &pending); err != nil {
-					return nil, nil, err
-				}
-			}
-			flush()
-		}
-		plans = append(plans, plan)
 	}
-	return plans, tasks, nil
+	if err := flushInline(pending); err != nil {
+		return nil, err
+	}
+	return plan, nil
+}
+
+// breakParagraphs shapes and line-breaks a flat list of paragraphs on the
+// engine's budget. Every task writes only its own slot, so the result does not
+// depend on how many workers ran or in which order they finished.
+func (e *Engine) breakParagraphs(ctx context.Context, pool *sync.Pool, tasks []*paraTask, opts LayoutOptions, typo Typography, lang language.Language) error {
+	if len(tasks) == 0 {
+		return nil
+	}
+	errs := make([]error, len(tasks))
+	e.parallelFor(ctx, len(tasks), func(i int) {
+		t := tasks[i]
+		w := leaseWorker(pool, typo, opts.Hyphenator, lang)
+		lines, err := w.wrapParagraph(ctx, t.para, t.width, typo, t.style, lang)
+		releaseWorker(pool, w)
+		if err != nil {
+			errs[i] = err
+			return
+		}
+		t.setLines(lines)
+	})
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	for i, err := range errs {
+		if err != nil {
+			return fmt.Errorf("paragraph %d: %w", i, err)
+		}
+	}
+	return nil
+}
+
+// attachLines moves paragraph line boxes onto the units that own them. Units
+// are visited in the same document order the plan produced tasks in, so the
+// match is a counter rather than a lookup.
+func attachLines(units []breakUnit, tasks []*paraTask, next int) int {
+	for i := range units {
+		u := &units[i]
+		switch u.kind {
+		case breakLines:
+			if next < len(tasks) && tasks[next].para == u.para {
+				u.lines = tasks[next].lines
+				next++
+			}
+		case breakBlockUnit:
+			next = attachLines(u.box.units, tasks, next)
+		}
+	}
+	return next
+}
+
+// pruneUnits drops paragraph units that produced no line box. The sequential
+// path never appended them in the first place; deferring shaping moves that
+// decision after the break phase.
+func pruneUnits(units []breakUnit) []breakUnit {
+	out := units[:0]
+	for i := range units {
+		u := units[i]
+		if u.kind == breakLines && len(u.lines) == 0 {
+			continue
+		}
+		if u.kind == breakBlockUnit {
+			u.box.units = pruneUnits(u.box.units)
+		}
+		out = append(out, u)
+	}
+	return out
 }
 
 // breakKit distinguishes the payload of a breakUnit.
@@ -946,15 +1050,15 @@ func lineX(align TextAlign, avail, width float32) float32 {
 // breakContext is the per-task state for shaping and line breaking. It only
 // produces break units; vertical placement happens later in layChapter.
 type breakContext struct {
-	ctx         context.Context
-	doc         *Document
-	typo        Typography
-	chapter     Chapter
-	defaultLang language.Language
-	limits      Limits
-	worker      *textWorker
-	inline      *layoutContext
-	explicitLH  map[NodeID]float32
+	doc        *Document
+	typo       Typography
+	limits     Limits
+	inline     *layoutContext
+	explicitLH map[NodeID]float32
+	// plan collects the paragraphs this walk produces, in document order. The
+	// units it returns carry the paragraph but no lines: shaping happens later,
+	// in parallel, one task per entry of plan.tasks.
+	plan *chapterPlan
 }
 
 func (bc *breakContext) block(nodes []Node, id NodeID, parentWidth float32, parentStyle Style) (*breakBox, error) {
@@ -1069,37 +1173,20 @@ func (bc *breakContext) tokens(tokens []inlineToken, width float32, blockStyle S
 					lang: t.lang, link: t.link,
 				})
 			}
-			lines, err := bc.worker.wrapParagraph(bc.ctx, p, width, bc.typo, blockStyle, bc.defaultLang)
-			if err != nil {
-				return nil, err
+			u := breakUnit{
+				kind:    breakLines,
+				para:    p,
+				widows:  clampI16(blockStyle.Widows),
+				orphans: clampI16(blockStyle.Orphans),
 			}
-			if len(lines) > 0 {
-				u := breakUnit{
-					kind:    breakLines,
-					para:    p,
-					widows:  clampI16(blockStyle.Widows),
-					orphans: clampI16(blockStyle.Orphans),
-				}
-				u.lines = make([]lineBreak, len(lines))
-				for li := range lines {
-					ln := &lines[li]
-					u.lines[li] = lineBreak{
-						end:            ln.end,
-						width:          ln.width,
-						ascent:         clampF16(ln.ascent),
-						descent:        clampF16(ln.descent),
-						implicitSize:   ln.implicitSize,
-						explicitHeight: ln.explicitHeight,
-					}
-				}
-				if j < len(tokens) && tokens[j].kind == tokenBreak {
-					u.marginBottom = 0
-				} else {
-					u.gapBottom = true
-					u.marginBottom = bc.typo.ParagraphGap
-				}
-				units = append(units, u)
+			if j < len(tokens) && tokens[j].kind == tokenBreak {
+				u.marginBottom = 0
+			} else {
+				u.gapBottom = true
+				u.marginBottom = bc.typo.ParagraphGap
 			}
+			units = append(units, u)
+			bc.plan.tasks = append(bc.plan.tasks, &paraTask{para: p, width: width, style: blockStyle})
 			i = j
 		}
 	}
@@ -1722,9 +1809,10 @@ func (l *Layout) WithColors(ink, background, link paint.Color) *Layout {
 		breakKeys: l.breakKeys,
 		pageKeys:  l.pageKeys,
 		paintKey:  paintKey(l.variants.newKeyer(), l.pageKeys, opts.Typography),
-		pool:      l.engine.newWorkerPool(opts, l.doc),
+		pool:      l.engine.workerPool(opts.Fonts),
 		lineCache: newLineCache(l.engine.lineCache),
 		cache:     make(map[int]*Page),
+		lang:      l.lang,
 	}
 	n.chapterTop, n.contentHeight = l.chapterTop, l.contentHeight
 	n.tileHeight, n.tileCount = l.tileHeight, l.tileCount
@@ -1734,17 +1822,16 @@ func (l *Layout) WithColors(ink, background, link paint.Color) *Layout {
 	return n
 }
 
-// newWorkerPool builds the workers a layout draws with. They carry its
-// typography, which is why a recoloured layout builds its own.
-func (e *Engine) newWorkerPool(opts LayoutOptions, doc *Document) *sync.Pool {
-	typo := opts.Typography
-	lang := language.NewLanguage(doc.meta.Language)
-	return &sync.Pool{New: func() any {
-		w := newTextWorker(opts.Fonts, typo, opts.Hyphenator)
-		w.defaultLang = lang
-		w.shapes = &e.shapes
-		return w
-	}}
+// leaseWorker borrows a shaping worker configured for this layout variant.
+// Every page, tile, hit test and selection takes one for the duration of the
+// call, so workers are never held across an API boundary and a Layout has no
+// shutdown to perform.
+func (l *Layout) leaseWorker() *textWorker {
+	return leaseWorker(l.pool, l.opts.Typography, l.opts.Hyphenator, l.lang)
+}
+
+func (l *Layout) releaseWorker(w *textWorker) {
+	releaseWorker(l.pool, w)
 }
 
 // Selection returns the rectangles covering the rune range from..to.
@@ -1774,8 +1861,8 @@ func (l *Layout) Selection(from, to Location) []SelectionQuad {
 		from, to = to, from
 		a, b = b, a
 	}
-	w := l.pool.Get().(*textWorker)
-	defer l.pool.Put(w)
+	w := l.leaseWorker()
+	defer l.releaseWorker(w)
 
 	var out []SelectionQuad
 	for ci := from.Chapter; ci <= to.Chapter; ci++ {

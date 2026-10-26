@@ -84,6 +84,9 @@ func (p *Page) Links() []Link {
 
 // Page returns page n, or nil if n is out of range. The page is rendered on
 // first access and cached according to Options.PageCache.
+//
+// Building a page shapes its lines on the engine's budget, so a page turn uses
+// the whole machine instead of one core. Prefetch warms a window ahead of time.
 func (l *Layout) Page(n int) *Page {
 	if l.opts.Mode == ModeScroll {
 		return nil
@@ -126,8 +129,6 @@ func (l *Layout) renderPage(n int) *Page {
 	}
 	info := &l.pages[n]
 	cf := &l.chapters[info.chapter]
-	w := l.pool.Get().(*textWorker)
-	defer l.pool.Put(w)
 
 	p := &Page{layout: l, number: n, chapter: info.chapter, top: info.top}
 	if bg := l.opts.Typography.Background; !bg.Transparent() {
@@ -143,7 +144,28 @@ func (l *Layout) renderPage(n int) *Page {
 		X: l.opts.Margins.Left, Y: l.opts.Margins.Top,
 		Width: contentWidth(l.opts), Height: contentHeight(l.opts),
 	}, dx, dy)
-	for i := info.first; i < info.last && i < cf.count(); i++ {
+
+	first, last := info.first, info.last
+	if first < 0 {
+		first = 0
+	}
+	if n := cf.count(); last > n {
+		last = n
+	}
+	// Lines are the only items that need shaping, and they are independent, so
+	// they are collected first and built in parallel. Everything else is a
+	// cheap copy in the loop below.
+	var jobs []lineJob
+	for i := first; i < last; i++ {
+		if it := cf.item(i); it.kind == itemLine {
+			jobs = append(jobs, lineJob{it: it, chapter: info.chapter, x: dx, y: dy + it.y})
+		}
+	}
+	painter := l.newPainter(jobs)
+	defer painter.close()
+
+	k := 0
+	for i := first; i < last; i++ {
 		itv := cf.item(i)
 		it := &itv
 		itemY := dy + it.y
@@ -155,39 +177,8 @@ func (l *Layout) renderPage(n int) *Page {
 				p.links = append(p.links, Link{Rect: r, URL: it.link})
 			}
 		case itemLine:
-			runs, _ := l.buildLine(w, it, info.chapter)
-			for j := range runs {
-				runs[j].X += dx
-				// buildLine returns baselines relative to the line box, so the
-				// line's own offset within the chapter flow has to be added.
-				runs[j].Y += dy + it.y
-			}
-			// Decorations are emitted before the line's glyphs, so they sit
-			// behind the ink at the same baseline.
-			for _, deco := range l.lineDecorations(w, it, info.chapter, runs) {
-				p.ops = append(p.ops, deco)
-			}
-			for j := range runs {
-				p.ops = append(p.ops, drawOp{
-					kind: opGlyphs,
-					rect: glyphOpRect(dx+it.x, itemY, it.width, it.height),
-					run:  runs[j],
-				})
-			}
-			for si := range it.para.segs {
-				seg := &it.para.segs[si]
-				if seg.link == "" {
-					continue
-				}
-				if int(seg.end) <= int(it.start) || int(seg.start) >= int(it.end) {
-					continue
-				}
-				x0, x1 := l.lineRuneX(w, it, info.chapter, int(seg.start), int(seg.end))
-				p.links = append(p.links, Link{
-					Rect: paint.Rect{X: dx + it.x + x0, Y: itemY, Width: x1 - x0, Height: it.height},
-					URL:  seg.link,
-				})
-			}
+			painter.paint(k, &p.ops, &p.links)
+			k++
 		}
 	}
 	return p
@@ -470,8 +461,8 @@ func (p *Page) HitTest(pt paint.Point) (Location, bool) {
 	cf := &l.chapters[info.chapter]
 	x := pt.X - l.opts.Margins.Left
 	y := pt.Y - l.opts.Margins.Top + info.top
-	w := l.pool.Get().(*textWorker)
-	defer l.pool.Put(w)
+	w := l.leaseWorker()
+	defer l.releaseWorker(w)
 	return l.hitTestItems(w, cf, info.chapter, info.first, info.last, x, y)
 }
 

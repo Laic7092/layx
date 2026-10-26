@@ -64,56 +64,111 @@ type lineEntry struct {
 //
 // The value stores shaped runs, not flow items and not positioned glyph runs:
 // callers must treat the returned slice as read-only.
+//
+// The cache is sharded so that building several pages at once (or a tile while
+// a page is being built) does not serialise on one mutex: every line lookup
+// takes its stripe by hash. Total capacity is unchanged — each stripe keeps
+// limit/stripes entries.
 type lineCache struct {
+	stripes []lineCacheStripe
+}
+
+type lineCacheStripe struct {
 	mu      sync.Mutex
 	limit   int
 	order   *list.List
 	entries map[lineKey]*list.Element
 }
 
+// lineCacheStripes is the number of shards. Sixteen is enough to keep lock
+// contention invisible on a 16-thread machine while still leaving each stripe
+// a useful share of a 256-entry default cache.
+const lineCacheStripes = 16
+
 func newLineCache(limit int) *lineCache {
-	return &lineCache{
-		limit:   limit,
-		order:   list.New(),
-		entries: make(map[lineKey]*list.Element, limit),
+	n := lineCacheStripes
+	if limit < n {
+		n = limit
 	}
+	if n <= 0 {
+		return nil
+	}
+	per := limit / n
+	if per < 1 {
+		per = 1
+	}
+	c := &lineCache{stripes: make([]lineCacheStripe, n)}
+	for i := range c.stripes {
+		c.stripes[i] = lineCacheStripe{
+			limit:   per,
+			order:   list.New(),
+			entries: make(map[lineKey]*list.Element, per),
+		}
+	}
+	return c
+}
+
+// stripeFor picks the shard for a key. Any deterministic function of the key
+// works; the rune range spreads a paragraph's lines across shards, which is
+// what makes parallel page building scale.
+func (c *lineCache) stripeFor(key lineKey) *lineCacheStripe {
+	h := uint32(key.start)*2654435761 + uint32(key.chapter)*40503
+	return &c.stripes[int(h>>7)%len(c.stripes)]
 }
 
 func (c *lineCache) get(key lineKey) (*lineEntry, bool) {
-	if c == nil || c.limit <= 0 {
+	if c == nil || len(c.stripes) == 0 {
 		return nil, false
 	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	e, ok := c.entries[key]
+	s := c.stripeFor(key)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	e, ok := s.entries[key]
 	if !ok {
 		return nil, false
 	}
-	c.order.MoveToFront(e)
+	s.order.MoveToFront(e)
 	return e.Value.(*lineEntry), true
 }
 
 func (c *lineCache) put(e *lineEntry) {
-	if c == nil || c.limit <= 0 {
+	if c == nil || len(c.stripes) == 0 {
 		return
 	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if existing, ok := c.entries[e.key]; ok {
-		existing.Value.(*lineEntry).runs = e.runs
-		existing.Value.(*lineEntry).weights = e.weights
-		c.order.MoveToFront(existing)
+	s := c.stripeFor(e.key)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if existing, ok := s.entries[e.key]; ok {
+		v := existing.Value.(*lineEntry)
+		v.runs, v.weights = e.runs, e.weights
+		s.order.MoveToFront(existing)
 		return
 	}
-	for c.order.Len() >= c.limit {
-		back := c.order.Back()
+	for s.order.Len() >= s.limit {
+		back := s.order.Back()
 		if back == nil {
 			break
 		}
-		delete(c.entries, back.Value.(*lineEntry).key)
-		c.order.Remove(back)
+		delete(s.entries, back.Value.(*lineEntry).key)
+		s.order.Remove(back)
 	}
-	c.entries[e.key] = c.order.PushFront(e)
+	s.entries[e.key] = s.order.PushFront(e)
+}
+
+// size reports the number of cached lines across all stripes. It is used by
+// tests and diagnostics.
+func (c *lineCache) size() int {
+	if c == nil {
+		return 0
+	}
+	n := 0
+	for i := range c.stripes {
+		s := &c.stripes[i]
+		s.mu.Lock()
+		n += s.order.Len()
+		s.mu.Unlock()
+	}
+	return n
 }
 
 // variantCache keeps the most recent whole-document variants. Capacity is
@@ -174,6 +229,14 @@ func (c *variantCache) markLimitsVerified() {
 
 func (c *variantCache) newKeyer() *keyer {
 	return &keyer{seedA: c.seedA, seedB: c.seedB}
+}
+
+// seeds returns the cache's hash seeds. Parallel key passes build one keyer per
+// task from the same seeds, so digests are identical to a sequential pass and
+// stay comparable across Relayout calls. The seeds are immutable once the
+// cache exists, so reading them needs no lock.
+func (c *variantCache) seeds() (maphash.Seed, maphash.Seed) {
+	return c.seedA, c.seedB
 }
 
 func (c *variantCache) getBreak(key cacheKey) *breakChapter {

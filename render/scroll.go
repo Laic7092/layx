@@ -1,6 +1,7 @@
 package render
 
 import (
+	"context"
 	"math"
 	"sort"
 	"time"
@@ -139,7 +140,8 @@ func (l *Layout) TileHeight() float32 {
 
 // Tile returns tile i, building its DisplayList on first access. Tiles are
 // cached up to Options.TileCache with an LRU policy. It returns nil in paged
-// mode and for out-of-range indices.
+// mode and for out-of-range indices. Like a page, a tile shapes its lines on the
+// engine's budget; Prefetch and Tiles warm a window ahead of time.
 func (l *Layout) Tile(i int) *Tile {
 	if l.opts.Mode != ModeScroll || i < 0 || i >= l.tileCount {
 		return nil
@@ -174,9 +176,13 @@ func (l *Layout) Tile(i int) *Tile {
 	return t
 }
 
-// Tiles synchronously builds tiles [lo, hi). It is the explicit prefetch API:
-// there is no hidden goroutine, so the host decides whether to call it on its
-// own worker. The range is clamped to [0, TileCount].
+// Tiles builds tiles [lo, hi). It is the explicit prefetch API: there is no
+// hidden goroutine, so the host decides whether to call it on its own worker.
+// The range is clamped to [0, TileCount].
+//
+// Tiles are independent, so the range is built on the engine's whole budget and
+// a scroll prefetch does not leave the cores idle. Prefetch is the same thing
+// with a context and the cache-size clamp.
 func (l *Layout) Tiles(lo, hi int) []*Tile {
 	if l.opts.Mode != ModeScroll {
 		return nil
@@ -186,11 +192,37 @@ func (l *Layout) Tiles(lo, hi int) []*Tile {
 	if hi <= lo {
 		return nil
 	}
-	out := make([]*Tile, 0, hi-lo)
-	for i := lo; i < hi; i++ {
-		out = append(out, l.Tile(i))
+	out := make([]*Tile, hi-lo)
+	// A window that is nearly all cached is one tile of real work, and helpers
+	// would only add goroutines that have nothing to build: the steady state of
+	// a scroll that slides one tile at a time. Below two misses, build in place.
+	if hi-lo < 2 || l.tileMisses(lo, hi) < 2 {
+		for k := range out {
+			out[k] = l.Tile(lo + k)
+		}
+		return out
 	}
+	l.engine.parallelFor(context.Background(), hi-lo, func(k int) {
+		out[k] = l.Tile(lo + k)
+	})
 	return out
+}
+
+// tileMisses counts the tiles of [lo, hi) that are not in the cache: the work a
+// parallel warm-up would actually have to do.
+func (l *Layout) tileMisses(lo, hi int) int {
+	if l.engine.tileCache <= 0 {
+		return hi - lo
+	}
+	n := 0
+	l.tileMu.Lock()
+	for i := lo; i < hi; i++ {
+		if _, ok := l.tileCache[i]; !ok {
+			n++
+		}
+	}
+	l.tileMu.Unlock()
+	return n
 }
 
 func touchInt(order []int, v int) []int {
@@ -234,9 +266,20 @@ func (l *Layout) buildTile(i int) *Tile {
 		}
 		t.ops = appendBoxOps(t.ops, l.chapters[bx].boxes, tileClip, l.opts.Margins.Left, ct-top)
 	}
-	w := l.pool.Get().(*textWorker)
-	defer l.pool.Put(w)
-
+	// Collect the tile's elements in paint order. Lines are the only elements
+	// that need shaping, and they are independent, so they are gathered first
+	// and painted in parallel; images are copied straight through.
+	type tileElem struct {
+		line  int
+		image drawOp
+		link  string
+		isOp  bool
+	}
+	var (
+		jobs  []lineJob
+		elems []tileElem
+	)
+	dx := l.opts.Margins.Left
 	for ; ci < len(l.chapters); ci++ {
 		ct := l.chapterTop[ci]
 		if ct >= bottom {
@@ -265,43 +308,8 @@ func (l *Layout) buildTile(i int) *Tile {
 				if itemTop < top {
 					continue
 				}
-				runs, pos := l.buildLine(w, it, ci)
-				for j := range runs {
-					runs[j].X += l.opts.Margins.Left
-					// run.Y is already the line baseline relative to the line
-					// box (as the paged display list expects).
-					runs[j].Y += itemTop - top
-				}
-				for _, deco := range l.lineDecorations(w, it, ci, runs) {
-					t.ops = append(t.ops, deco)
-				}
-				for j := range runs {
-					t.ops = append(t.ops, drawOp{
-						kind: opGlyphs,
-						rect: glyphOpRect(l.opts.Margins.Left+it.x, itemTop-top, it.width, it.height),
-						run:  runs[j],
-					})
-				}
-				if it.para == nil {
-					continue
-				}
-				for si := range it.para.segs {
-					seg := &it.para.segs[si]
-					if seg.link == "" {
-						continue
-					}
-					if int(seg.end) <= int(it.start) || int(seg.start) >= int(it.end) {
-						continue
-					}
-					x0, x1 := runeXFromPos(pos, int(seg.start), int(seg.end))
-					t.links = append(t.links, Link{
-						Rect: paint.Rect{
-							X: l.opts.Margins.Left + it.x + x0, Y: itemTop - top,
-							Width: x1 - x0, Height: it.height,
-						},
-						URL: seg.link,
-					})
-				}
+				elems = append(elems, tileElem{line: len(jobs)})
+				jobs = append(jobs, lineJob{it: itv, chapter: ci, x: dx, y: itemTop - top})
 			case itemImage:
 				if itemTop+it.height <= top {
 					continue
@@ -310,15 +318,29 @@ func (l *Layout) buildTile(i int) *Tile {
 				// them in every tile they intersect; the painter clips, and
 				// image draws contribute no glyphs to the consistency check.
 				r := paint.Rect{
-					X: l.opts.Margins.Left + it.x, Y: itemTop - top,
+					X: dx + it.x, Y: itemTop - top,
 					Width: it.width, Height: it.height,
 				}
-				t.ops = append(t.ops, drawOp{kind: opImage, rect: r, image: it.image})
-				if it.link != "" {
-					t.links = append(t.links, Link{Rect: r, URL: it.link})
-				}
+				elems = append(elems, tileElem{
+					isOp:  true,
+					image: drawOp{kind: opImage, rect: r, image: it.image},
+					link:  it.link,
+				})
 			}
 		}
+	}
+	painter := l.newPainter(jobs)
+	defer painter.close()
+	for i := range elems {
+		e := &elems[i]
+		if e.isOp {
+			t.ops = append(t.ops, e.image)
+			if e.link != "" {
+				t.links = append(t.links, Link{Rect: e.image.rect, URL: e.link})
+			}
+			continue
+		}
+		painter.paint(e.line, &t.ops, &t.links)
 	}
 	return t
 }
@@ -502,8 +524,8 @@ func (l *Layout) HitTest(x, y float32) (Location, bool) {
 			return Location{}, false
 		}
 		cf := &l.chapters[ci]
-		w := l.pool.Get().(*textWorker)
-		defer l.pool.Put(w)
+		w := l.leaseWorker()
+		defer l.releaseWorker(w)
 		return l.hitTestItems(w, cf, ci, 0, cf.count(), x, y-l.chapterTop[ci])
 	}
 	info, _, local, ok := l.pagedContentPos(y)
@@ -511,8 +533,8 @@ func (l *Layout) HitTest(x, y float32) (Location, bool) {
 		return Location{}, false
 	}
 	cf := &l.chapters[info.chapter]
-	w := l.pool.Get().(*textWorker)
-	defer l.pool.Put(w)
+	w := l.leaseWorker()
+	defer l.releaseWorker(w)
 	return l.hitTestItems(w, cf, info.chapter, info.first, info.last, x, info.top+local)
 }
 

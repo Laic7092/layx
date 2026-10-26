@@ -3,6 +3,7 @@ package render
 import (
 	"fmt"
 	"runtime"
+	"sync"
 	"sync/atomic"
 
 	"github.com/laix/layx/render/paint"
@@ -10,7 +11,10 @@ import (
 
 // Options configures an Engine.
 type Options struct {
-	// Workers is the maximum number of layout workers. 0 means GOMAXPROCS.
+	// Workers is the maximum number of goroutines the Engine runs in parallel,
+	// including the calling goroutine. 0 means GOMAXPROCS. It is a budget, not
+	// a per-call limit: concurrent layouts, page builds and prefetches split it
+	// between them, so the whole library never oversubscribes the machine.
 	Workers int
 	// PageCache is the number of rendered pages cached per Layout. 0 uses 4.
 	PageCache int
@@ -192,12 +196,31 @@ func contentHeight(o LayoutOptions) float32 {
 }
 
 // Engine owns layout workers and configuration. It holds no document state.
+//
+// An Engine may be used by any number of goroutines at once. Its parallel
+// phases draw from one process-wide budget of Workers goroutines, so concurrent
+// layouts, page builds and prefetches share the machine evenly instead of each
+// starting a full set of workers.
 type Engine struct {
 	workers   int
 	pageCache int
 	tileCache int
 	lineCache int
 	limits    Limits
+
+	// budget caps the total number of helper goroutines this Engine runs.
+	budget *budget
+	// active is the number of parallel phases in flight; it divides the
+	// budget between them.
+	active atomic.Int64
+	// slot hands out per-worker ids for the load-balance diagnostics.
+	slot atomic.Int64
+
+	// pools holds one textWorker pool per font set. Font faces, shapers and
+	// scratch buffers are per worker, so pooling them by font set is what keeps
+	// a relayout from paying for them again.
+	poolsMu sync.Mutex
+	pools   map[*FontSet]*sync.Pool
 
 	// shapes counts shaping calls. Layout variants that reuse cached line boxes
 	// must not increment it; tests use it to prove the cache works.
@@ -246,7 +269,9 @@ func New(opts Options) (*Engine, error) {
 		tileCache: tileCache,
 		lineCache: lineCache,
 		limits:    opts.Limits.withDefaults(),
+		budget:    newBudget(workers),
 		measure:   opts.Measure,
+		stats:     statsCounters{busy: make([]atomic.Int64, workers)},
 	}, nil
 }
 

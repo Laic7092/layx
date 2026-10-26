@@ -71,6 +71,15 @@ func TestEngineStats(t *testing.T) {
 	if stageSum > s.Total {
 		t.Fatalf("stage sum %v exceeds Total %v", stageSum, s.Total)
 	}
+	if len(s.Busy) != on.Workers() {
+		t.Fatalf("Busy has %d slots, want %d", len(s.Busy), on.Workers())
+	}
+	if s.Imbalance < 0 || s.Imbalance > 1 {
+		t.Fatalf("Imbalance = %v, want [0,1]", s.Imbalance)
+	}
+	if s.Tasks == 0 {
+		t.Fatal("Tasks = 0, want > 0")
+	}
 
 	// Relayout counts as another layout and must not build display lists.
 	if _, err := layout.Relayout(ctx, opts); err != nil {
@@ -119,7 +128,16 @@ func TestEngineStats(t *testing.T) {
 	}
 
 	on.ResetStats()
-	if s := on.Stats(); s != (Stats{}) {
+	s = on.Stats()
+	if s.Layouts != 0 || s.Total != 0 || s.Shapes != 0 || s.Tasks != 0 || s.Pages != 0 || s.Tiles != 0 {
 		t.Fatalf("ResetStats left counters: %+v", s)
+	}
+	if s.Imbalance != 0 {
+		t.Fatalf("ResetStats left balance counters: %+v", s)
+	}
+	for i, d := range s.Busy {
+		if d != 0 {
+			t.Fatalf("ResetStats left Busy[%d] = %v", i, d)
+		}
 	}
 }

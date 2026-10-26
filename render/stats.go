@@ -43,6 +43,19 @@ type Stats struct {
 	Display time.Duration
 	// Shapes is the number of shaping calls, counted even when Measure is off.
 	Shapes int64
+	// Tasks is the number of work items handed to parallel phases (chapters,
+	// paragraphs, page items). It is counted even when Measure is off; the
+	// ratio to Layouts is the library's average parallelism per layout.
+	Tasks int64
+	// Busy is per-worker slot busy wall time within parallel phases, index 0
+	// being the calling goroutine. Only measured work is counted, so it never
+	// exceeds Total. It is nil when Measure is off.
+	Busy []time.Duration
+	// Imbalance is (busiest - idlest) / busiest over the used worker slots, in
+	// [0,1]. Zero means every participant did the same amount of work; values
+	// near 1 mean one worker carried the layout. Use it to check that the task
+	// granularity is fine enough for the document at hand.
+	Imbalance float64
 	// Pages and Tiles are the number of display lists built so far. A build
 	// raced by two goroutines counts twice.
 	Pages int64
@@ -60,6 +73,17 @@ type statsCounters struct {
 	display  atomic.Int64
 	pages    atomic.Int64
 	tiles    atomic.Int64
+	tasks    atomic.Int64
+	busy     []atomic.Int64
+}
+
+// recordBusy adds d to one worker slot's busy time. Out-of-range slots (a
+// nested phase reporting under its parent's id) are ignored.
+func (s *statsCounters) recordBusy(slot int, d time.Duration) {
+	if slot < 0 || slot >= len(s.busy) {
+		return
+	}
+	s.busy[slot].Add(int64(d))
 }
 
 func (s *statsCounters) reset() {
@@ -73,11 +97,15 @@ func (s *statsCounters) reset() {
 	s.display.Store(0)
 	s.pages.Store(0)
 	s.tiles.Store(0)
+	s.tasks.Store(0)
+	for i := range s.busy {
+		s.busy[i].Store(0)
+	}
 }
 
 // Stats returns a snapshot of the Engine's counters.
 func (e *Engine) Stats() Stats {
-	return Stats{
+	s := Stats{
 		Layouts:  e.stats.layouts.Load(),
 		Total:    time.Duration(e.stats.total.Load()),
 		Keys:     time.Duration(e.stats.keys.Load()),
@@ -87,9 +115,33 @@ func (e *Engine) Stats() Stats {
 		Assemble: time.Duration(e.stats.assemble.Load()),
 		Display:  time.Duration(e.stats.display.Load()),
 		Shapes:   e.shapes.Load(),
+		Tasks:    e.stats.tasks.Load(),
 		Pages:    e.stats.pages.Load(),
 		Tiles:    e.stats.tiles.Load(),
 	}
+	if len(e.stats.busy) > 0 {
+		s.Busy = make([]time.Duration, len(e.stats.busy))
+		var busiest, idlest time.Duration
+		used := 0
+		for i := range s.Busy {
+			d := time.Duration(e.stats.busy[i].Load())
+			s.Busy[i] = d
+			if d <= 0 {
+				continue
+			}
+			if used == 0 || d < idlest {
+				idlest = d
+			}
+			if d > busiest {
+				busiest = d
+			}
+			used++
+		}
+		if busiest > 0 && used > 1 {
+			s.Imbalance = float64(busiest-idlest) / float64(busiest)
+		}
+	}
+	return s
 }
 
 // ResetStats zeroes every counter, including Shapes. Call it between layouts

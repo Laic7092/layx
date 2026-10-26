@@ -40,7 +40,7 @@ tools/{bench_native,memreport,snapshotimg,corpora}  开发工具，不属于库
 ## 快速开始
 
 ```go
-eng, _ := render.New(render.Options{Workers: 0}) // 0 = GOMAXPROCS
+eng, _ := render.New(render.Options{Workers: 0}) // 0 = GOMAXPROCS；整个 Engine 的并发预算
 
 fonts, _ := render.NewFontSet(render.FontFace{
     Family: "serif",
@@ -112,7 +112,10 @@ render.LayoutOptions{Mode: render.ModeScroll, TileHeight: 1024} // 0 = Viewport.
 layout.ContentHeight()
 layout.TileCount()
 tile := layout.Tile(i) // 首次构建，之后按 Options.TileCache（默认 8）做 LRU
-layout.Tiles(lo, hi)   // 同步预取，不引入隐藏 goroutine
+layout.Tiles(lo, hi)   // 并行构建一段 tile（tile 之间独立，用满并发预算）
+layout.Prefetch(ctx, lo, hi)                     // 分页=页、滚动=tile，同步并行
+pf := layout.StartPrefetch(ctx, lo, hi)          // 同上，但跑在显式句柄的 goroutine 上
+err := pf.Wait()
 ```
 
 **tile 是 DisplayList，不是位图**：`render` 没有光栅器，是否缓存成图片由宿主决定。
@@ -124,6 +127,29 @@ layout.Tiles(lo, hi)   // 同步预取，不引入隐藏 goroutine
 宿主画家可实现可选的 `paint.Clipped`（`Visible() paint.Rect`）：`Page.Draw` / `Tile.Draw`
 会跳过与可见区不相交的 op，字形 op 各自带行盒矩形。不实现该接口的画家仍然收到全部
 op，回放语义不变。
+
+## 并发与预算
+
+`Options.Workers`（默认 `GOMAXPROCS`）是**整个 Engine 的并发预算**，不是每次调用的上限：
+
+- 并发的多个 `Layout` / `Relayout` / `Prefetch` 共用这一份预算，按活跃 phase 数平分。
+  一个先开始的长布局不会占满机器：多出来的 helper 在完成当前任务（几十微秒）后交还
+  预算，后到的调用随即接手。实测「前台小布局 + 后台整本重排」从 4.2 ms 降到 1.6–2.1 ms
+  （单独跑 1.27 ms）。
+- 任何 phase 的调用方永远参与计算；helper 抢预算不做阻塞等待，所以**不会死锁**，嵌套
+  的 phase（预取里的单页）拿不到预算时就退化成在调用方顺序执行。
+- 除了显式 `StartPrefetch` 返回的那个 goroutine，库不起后台 goroutine：所有 helper 在
+  phase 返回前 join。`Engine.Close()` 只是丢掉复用的 worker（字体 face 缓存、shaper、
+  scratch），可以不调；调了之后 Engine 仍可继续用。
+
+**断行任务的粒度是段落，不是块**。`Layout` 的断行分三段：先按章并行规划（样式继承、
+inline 分词、建块树，不做 shaping），再把全书段落汇成一个扁平任务列表让 worker 抢，
+最后顺序把行盒贴回块树。所以"整章正文包在一个 `<div>` 里"这种书也能跑满所有核，
+不会出现「一个块拖住其余 worker」的尖峰。
+
+`Options{Measure: true}` 时 `Stats` 还给出 `Tasks`（提交给并行 phase 的任务数）、
+`Busy`（每个 worker slot 的忙时）与 `Imbalance`（(最忙-最闲)/最忙）。后者是验收负载
+是否均衡的指标：段落粒度够细时它接近 0。
 
 ## 位置与坐标
 
@@ -166,7 +192,8 @@ shaped 行，命中不增加 `Engine.shapes`。
 
 `render.Options{Measure: true}` 打开计时，`Engine.Stats()` 返回累计墙钟：`Total`、
 `Keys`、`Break`、`Stack`、`Paginate`、`Assemble`，以及独立累计的 `Display`；`Measure`
-关闭时布局路径不读时钟。
+关闭时布局路径不读时钟。`Tasks`、`Shapes`、`Pages`、`Tiles` 始终计数，`Busy` /
+`Imbalance` 只在 `Measure` 打开时统计。
 
 ## 性能
 
@@ -182,6 +209,27 @@ shaped 行，命中不增加 `Engine.shapes`。
   每项 4 B 的 y 与 4 B 的 unit 下标，`flowItem` 按需物化。
 - **wasm 单线程比原生慢 4.6×**（269.6 ms）：这是运行时不是算法，所以在浏览器里跑 layx
   目前比浏览器自己的排版慢；作为原生库嵌进阅读器才与 Blink 同级。
+
+### 并发与负载（`go test ./render -bench`，8 核 / 16 线程）
+
+冷布局的并行度（20 万字中文，`BenchmarkLayoutScale`；与改前逐点一致，±2% 噪声）：
+
+| workers | 1 | 2 | 4 | 8 | 16 |
+|---|---|---|---|---|---|
+| 墙钟 | 44.9 ms | 23.7 ms | 13.3 ms | 8.9 ms | 7.8 ms |
+
+它 95% 是 shaping 与 UAX14，8 个物理核上 8 worker 已经 5.1×、16 worker 5.8×，SMT 之后
+就到顶了：**单次冷布局的并行上限是硬件，不是任务粒度**。500 万字 / 8 worker 与改前持平
+（±2%），分配少 4%。
+
+真正变快的是三处结构性的串行与争抢（同机 `-benchtime 20x` 多次，改前 → 改后）：
+
+| 场景 | 改前 | 改后 |
+|---|---|---|
+| 重排（100 章 / 4000 段，只改段间距） | 1.16 ms | 0.31–0.38 ms |
+| 16 页显示列表（冷，逐页同步建） | 2.60 ms | 2.39 ms |
+| 同上，改用 `Prefetch` | — | 0.84 ms |
+| 前台小布局 + 后台整本布局 | 4.2 ms | 1.6–2.1 ms |
 
 数字由脚本现场测量，不要跨组比较：`scripts/ab.sh`（浏览器侧）、`tools/bench_native`
 （原生侧，同一份字体字节）、`go test ./render -run '^$' -bench 'BenchmarkLayout5M|BenchmarkRelayout'`

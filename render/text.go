@@ -142,6 +142,21 @@ func newTextWorker(fs *FontSet, typo Typography, hyphenator Hyphenator) *textWor
 	return w
 }
 
+// prepare points a pooled worker at one layout variant. Workers outlive the
+// Layout that leased them, so everything that differs between variants — the
+// typography, the dictionary and the document language — is set on lease, not
+// at construction. The font set is fixed: each pool belongs to one FontSet.
+func (w *textWorker) prepare(typo Typography, hyphenator Hyphenator, lang language.Language) {
+	w.typo = typo
+	w.hyphenator = hyphenator
+	w.defaultLang = lang
+	// The paragraph memo is deliberately kept: it is keyed by the paragraph
+	// pointer, so a stale entry can never be mistaken for another paragraph.
+	// Keeping it means a worker that paints several lines of the same paragraph
+	// materializes that text once instead of once per line, even though it was
+	// leased again between lines.
+}
+
 func (w *textWorker) order(st Style) []int {
 	key := fontKey{family: st.FontFamily, weight: st.FontWeight, slant: st.FontSlant}
 	if o, ok := w.orders[key]; ok {

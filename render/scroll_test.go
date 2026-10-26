@@ -612,10 +612,7 @@ func TestTileCacheEviction(t *testing.T) {
 			}
 		}
 	}
-	l.lineCache.mu.Lock()
-	lines := l.lineCache.order.Len()
-	l.lineCache.mu.Unlock()
-	if lines > 64 {
+	if lines := l.lineCache.size(); lines > 64 {
 		t.Fatalf("line cache size = %d, want <= 64", lines)
 	}
 }
@@ -663,10 +660,7 @@ func TestLineCacheBounded(t *testing.T) {
 	for i := 0; i < l.TileCount() && i < 10; i++ {
 		l.Tile(i)
 	}
-	l.lineCache.mu.Lock()
-	n := l.lineCache.order.Len()
-	l.lineCache.mu.Unlock()
-	if n > 2 {
+	if n := l.lineCache.size(); n > 2 {
 		t.Fatalf("line cache size = %d, want <= 2", n)
 	}
 }
