@@ -246,11 +246,12 @@ func (l *Layout) buildTile(i int) *Tile {
 		localTop := top - ct
 		// Items are ordered by content y. Skip whole runs before the tile in
 		// O(log n), then walk the few items that intersect it.
-		start := sort.Search(len(cf.items), func(k int) bool {
-			return cf.items[k].y+cf.items[k].height > localTop
+		start := sort.Search(cf.count(), func(k int) bool {
+			return cf.itemBottom(k) > localTop
 		})
-		for k := start; k < len(cf.items); k++ {
-			it := &cf.items[k]
+		for k := start; k < cf.count(); k++ {
+			itv := cf.item(k)
+			it := &itv
 			itemTop := ct + it.y
 			if itemTop >= bottom {
 				break
@@ -341,21 +342,21 @@ func (l *Layout) chapterAtContentY(y float32) int {
 // itemAt returns the item containing y in a chapter's content coordinates.
 // first/last bound the search (all items for scroll, one page for paged).
 func itemAt(cf *chapterFlow, first, last int, y float32) int {
-	first = clampInt(first, 0, len(cf.items))
-	last = clampInt(last, first, len(cf.items))
+	total := cf.count()
+	first = clampInt(first, 0, total)
+	last = clampInt(last, first, total)
 	if last <= first {
 		return -1
 	}
 	n := last - first
 	k := sort.Search(n, func(i int) bool {
-		it := &cf.items[first+i]
-		return it.y+it.height > y
+		return cf.itemBottom(first+i) > y
 	})
 	if k >= n {
 		k = n - 1
 	}
 	idx := first + k
-	if idx > first && cf.items[idx].y > y {
+	if idx > first && cf.ys[idx] > y {
 		idx--
 	}
 	return idx
@@ -380,7 +381,7 @@ func (l *Layout) LocationAt(y float32) (Location, bool) {
 			return Location{}, false
 		}
 		cf := &l.chapters[ci]
-		idx := itemAt(cf, 0, len(cf.items), y-l.chapterTop[ci])
+		idx := itemAt(cf, 0, cf.count(), y-l.chapterTop[ci])
 		if idx < 0 {
 			return Location{}, false
 		}
@@ -413,17 +414,17 @@ func (l *Layout) OffsetOf(loc Location) (float32, bool) {
 	}
 	cf := &l.chapters[loc.Chapter]
 	idx, ok := cf.itemOf(loc)
-	if !ok || idx < 0 || idx >= len(cf.items) {
+	if !ok || idx < 0 || idx >= cf.count() {
 		return 0, false
 	}
 	if l.opts.Mode == ModeScroll {
-		return l.contentYOfItem(cf, loc.Chapter, 0, cf.items[idx].y), true
+		return l.contentYOfItem(cf, loc.Chapter, 0, cf.ys[idx]), true
 	}
 	page := cf.pageOfItem(idx)
 	if page < 0 || page >= len(cf.pages) {
 		return 0, false
 	}
-	return l.contentYOfItem(cf, loc.Chapter, page, cf.items[idx].y), true
+	return l.contentYOfItem(cf, loc.Chapter, page, cf.ys[idx]), true
 }
 
 // contentYOfItem maps a chapter content y to book content coordinates. page is
@@ -503,7 +504,7 @@ func (l *Layout) HitTest(x, y float32) (Location, bool) {
 		cf := &l.chapters[ci]
 		w := l.pool.Get().(*textWorker)
 		defer l.pool.Put(w)
-		return l.hitTestItems(w, cf, ci, 0, len(cf.items), x, y-l.chapterTop[ci])
+		return l.hitTestItems(w, cf, ci, 0, cf.count(), x, y-l.chapterTop[ci])
 	}
 	info, _, local, ok := l.pagedContentPos(y)
 	if !ok {
@@ -545,15 +546,16 @@ func (l *Layout) pagedContentPos(y float32) (*pageInfo, int, float32, bool) {
 
 // locationAtItem returns a Location at the first rune of item idx.
 func (l *Layout) locationAtItem(cf *chapterFlow, chapter, idx int) (Location, bool) {
-	if idx < 0 || idx >= len(cf.items) {
+	if idx < 0 || idx >= cf.count() {
 		return Location{}, false
 	}
-	it := &cf.items[idx]
+	itv := cf.item(idx)
+	it := &itv
 	if it.kind == itemImage {
 		return Location{
 			Chapter: chapter,
 			Node:    it.node,
-			Anchor:  cf.nodeAnchor[it.node],
+			Anchor:  cf.nodeAnchorOf(it.node),
 		}, true
 	}
 	if it.para == nil {
@@ -570,7 +572,7 @@ func (l *Layout) locationAtItem(cf *chapterFlow, chapter, idx int) (Location, bo
 	return Location{
 		Chapter: chapter,
 		Node:    seg.node,
-		Anchor:  cf.nodeAnchor[seg.node],
+		Anchor:  cf.nodeAnchorOf(seg.node),
 		Offset:  off,
 	}, true
 }

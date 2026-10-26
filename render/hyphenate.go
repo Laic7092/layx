@@ -49,24 +49,24 @@ func (p *paragraph) hyphenAt(i int32) bool {
 //
 // The original paragraph text is never modified: hit testing, selection,
 // anchors and node offsets keep using original rune indexes.
-func (w *textWorker) hyphenatedParagraph(p *paragraph) (*paragraph, []int32, map[int32]struct{}) {
+func (w *textWorker) hyphenatedParagraph(p *paragraph, text []rune) (*paragraph, []rune, []int32, map[int32]struct{}) {
 	p.hyphPoints = nil
 	p.hyphAdv = nil
-	if w.hyphenator == nil || len(p.text) == 0 {
-		return nil, nil, nil
+	if w.hyphenator == nil || len(text) == 0 {
+		return nil, nil, nil, nil
 	}
 	insert := make(map[int32]struct{})
-	for i := 0; i < len(p.text); {
-		if !hyphenWordRune(p.text[i]) {
+	for i := 0; i < len(text); {
+		if !hyphenWordRune(text[i]) {
 			i++
 			continue
 		}
 		j := i
-		for j < len(p.text) && hyphenWordRune(p.text[j]) {
+		for j < len(text) && hyphenWordRune(text[j]) {
 			j++
 		}
 		if j-i >= 5 {
-			word := p.text[i:j]
+			word := text[i:j]
 			for _, b := range w.hyphenator.Breaks(word) {
 				if b > 0 && b < len(word) {
 					insert[int32(i+b)] = struct{}{}
@@ -76,7 +76,7 @@ func (w *textWorker) hyphenatedParagraph(p *paragraph) (*paragraph, []int32, map
 		i = j
 	}
 	if len(insert) == 0 {
-		return nil, nil, nil
+		return nil, nil, nil, nil
 	}
 
 	points := make([]int32, 0, len(insert))
@@ -86,21 +86,21 @@ func (w *textWorker) hyphenatedParagraph(p *paragraph) (*paragraph, []int32, map
 	sort.Slice(points, func(i, j int) bool { return points[i] < points[j] })
 	p.hyphPoints = points
 
-	text := make([]rune, 0, len(p.text)+len(points))
-	wrapIndex := make([]int32, len(p.text)+1)
-	origIndex := make([]int32, 1, len(p.text)+len(points)+1)
+	wrapText := make([]rune, 0, len(text)+len(points))
+	wrapIndex := make([]int32, len(text)+1)
+	origIndex := make([]int32, 1, len(text)+len(points)+1)
 	wrapHyph := make(map[int32]struct{}, len(points))
-	for i, r := range p.text {
+	for i, r := range text {
 		if _, ok := insert[int32(i)]; ok {
-			wrapHyph[int32(len(text))] = struct{}{}
-			text = append(text, '-')
+			wrapHyph[int32(len(wrapText))] = struct{}{}
+			wrapText = append(wrapText, '-')
 			origIndex = append(origIndex, int32(i))
 		}
-		wrapIndex[i] = int32(len(text))
-		text = append(text, r)
+		wrapIndex[i] = int32(len(wrapText))
+		wrapText = append(wrapText, r)
 		origIndex = append(origIndex, int32(i+1))
 	}
-	wrapIndex[len(p.text)] = int32(len(text))
+	wrapIndex[len(text)] = int32(len(wrapText))
 
 	segs := make([]paraSeg, len(p.segs))
 	for i := range p.segs {
@@ -109,5 +109,5 @@ func (w *textWorker) hyphenatedParagraph(p *paragraph) (*paragraph, []int32, map
 		seg.end = wrapIndex[seg.end]
 		segs[i] = seg
 	}
-	return &paragraph{text: text, segs: segs, style: p.style}, origIndex, wrapHyph
+	return &paragraph{segs: segs, style: p.style, runeLen: int32(len(wrapText))}, wrapText, origIndex, wrapHyph
 }

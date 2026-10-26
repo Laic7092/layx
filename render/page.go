@@ -143,8 +143,9 @@ func (l *Layout) renderPage(n int) *Page {
 		X: l.opts.Margins.Left, Y: l.opts.Margins.Top,
 		Width: contentWidth(l.opts), Height: contentHeight(l.opts),
 	}, dx, dy)
-	for i := info.first; i < info.last && i < len(cf.items); i++ {
-		it := &cf.items[i]
+	for i := info.first; i < info.last && i < cf.count(); i++ {
+		itv := cf.item(i)
+		it := &itv
 		itemY := dy + it.y
 		switch it.kind {
 		case itemImage:
@@ -227,7 +228,7 @@ func (l *Layout) buildLine(w *textWorker, it *flowItem, chapter int) ([]paint.Gl
 	if p == nil || int(it.end) <= int(it.start) {
 		return nil, nil
 	}
-	runs := l.shapeLine(w, it, chapter)
+	runs, weights := l.shapeLine(w, it, chapter)
 	if len(runs) == 0 {
 		return nil, nil
 	}
@@ -243,10 +244,8 @@ func (l *Layout) buildLine(w *textWorker, it *flowItem, chapter int) ([]paint.Gl
 	// Justification slack is shared by spaces and CJK inter-character gaps.
 	// Distributing it to spaces alone (the old behaviour) opens huge holes in
 	// mixed Chinese/Latin lines, which usually contain only a few spaces.
-	var weights []float32
 	factor := float32(0)
 	if extra > 0 && glyphCount > 1 {
-		weights = justifyWeights(p.text, runs, w.typo.Rules.PunctuationCompression)
 		total := float32(0)
 		for _, wgt := range weights {
 			total += wgt
@@ -405,17 +404,25 @@ func justifyWeights(text []rune, runs []shapedRun, compress bool) []float32 {
 
 // shapeLine returns the cached shaped runs for a line, shaping on a miss. The
 // returned slice is shared and must be treated as read-only.
-func (l *Layout) shapeLine(w *textWorker, it *flowItem, chapter int) []shapedRun {
+func (l *Layout) shapeLine(w *textWorker, it *flowItem, chapter int) ([]shapedRun, []float32) {
 	if it.para == nil || int(it.end) <= int(it.start) {
-		return nil
+		return nil, nil
 	}
 	key := lineKey{chapter: chapter, para: it.para, start: it.start, end: it.end}
-	if runs, ok := l.lineCache.get(key); ok {
-		return runs
+	if e, ok := l.lineCache.get(key); ok {
+		return e.runs, e.weights
 	}
-	runs := w.shapeRange(it.para, int(it.start), int(it.end), w.defaultLang)
-	l.lineCache.put(key, runs)
-	return runs
+	text := w.paraText(it.para)
+	runs := w.shapeRange(it.para, text, int(it.start), int(it.end), w.defaultLang)
+	var weights []float32
+	if it.align == AlignJustify && !it.last && it.avail > it.width {
+		// The weights depend only on the text, so they are computed with the
+		// shaping they belong to and cached with it: drawing a justified line
+		// must not materialize the paragraph again.
+		weights = justifyWeights(text, runs, w.typo.Rules.PunctuationCompression)
+	}
+	l.lineCache.put(&lineEntry{key: key, runs: runs, weights: weights})
+	return runs, weights
 }
 
 // lineRuneX maps a paragraph rune range to line-local x coordinates. Positions
@@ -472,36 +479,49 @@ func (p *Page) HitTest(pt paint.Point) (Location, bool) {
 // coordinates. first/last bound the items that may be hit (a page range, or
 // the whole chapter for scroll layouts).
 func (l *Layout) hitTestItems(w *textWorker, cf *chapterFlow, chapter, first, last int, x, y float32) (Location, bool) {
-	if last > len(cf.items) {
-		last = len(cf.items)
+	if n := cf.count(); last > n {
+		last = n
 	}
 	if first < 0 {
 		first = 0
 	}
+	// Walk unit by unit: a unit's items are contiguous in both the unit and
+	// the line slots, so this touches each line box once instead of looking it
+	// up per item.
 	best := -1
 	bestDist := float32(1e30)
-	for i := first; i < last; i++ {
-		it := &cf.items[i]
-		width := it.width
-		if it.kind == itemLine {
-			width = it.avail
+	u := int(cf.unitOf[first])
+	for i := first; i < last; {
+		lu := &cf.units[u]
+		end := int(lu.first) + lu.itemCount()
+		if end > last {
+			end = last
 		}
-		dx := axisDistance(x, it.x, it.x+width)
-		dy := axisDistance(y, it.y, it.y+it.height)
-		d := dx*dx + dy*dy
-		if d < bestDist {
-			best, bestDist = i, d
+		for k := i; k < end; k++ {
+			it := cf.unitExtent(u, k-int(lu.first), k)
+			width := it.width
+			if it.kind == itemLine {
+				width = it.avail
+			}
+			dx := axisDistance(x, it.x, it.x+width)
+			dy := axisDistance(y, it.y, it.y+it.height)
+			if d := dx*dx + dy*dy; d < bestDist {
+				best, bestDist = k, d
+			}
 		}
+		i = end
+		u++
 	}
 	if best < 0 {
 		return Location{}, false
 	}
-	it := &cf.items[best]
+	bestIt := cf.item(best)
+	it := &bestIt
 	if it.kind == itemImage {
 		return Location{
 			Chapter: chapter,
 			Node:    it.node,
-			Anchor:  cf.nodeAnchor[it.node],
+			Anchor:  cf.nodeAnchorOf(it.node),
 		}, true
 	}
 	pos := l.lineGlyphPositions(w, it, chapter)
@@ -530,7 +550,7 @@ func (l *Layout) hitTestItems(w *textWorker, cf *chapterFlow, chapter, first, la
 	return Location{
 		Chapter: chapter,
 		Node:    seg.node,
-		Anchor:  cf.nodeAnchor[seg.node],
+		Anchor:  cf.nodeAnchorOf(seg.node),
 		Offset:  off,
 	}, true
 }

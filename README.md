@@ -16,6 +16,7 @@ XHTML / 选择器 / 级联                ↓
 
 已实现：分页与滚动两条输出路径、三层布局缓存、shaped 行缓存、tile 缓存、
 命中测试/跨页选区/锚点映射、CJK 断行与标点政策、可插拔断字、边框/背景/文字装饰。
+布局常驻内存约 **4 B/字**（整本书，不含文档与字体）。
 设计取舍见 [`docs/design.md`](docs/design.md)；标点/断行政策、默认值的规范出处、
 中文正文的推荐开关组见 [`docs/text-rules.md`](docs/text-rules.md)。
 
@@ -28,7 +29,7 @@ github.com/laix/layx/render/hyphen/en  可选：TeX 英文断字模式，核心�
 github.com/laix/layx/epub              EPUB/XHTML/CSS → render.Document（nested module）
 examples/layout                        最小示例：排版并打印页数
 examples/wasm                          wasm + Canvas 2D 原型（含 bench 路径）
-tools/{bench_native,snapshotimg,corpora}  开发工具，不属于库
+tools/{bench_native,memreport,snapshotimg,corpora}  开发工具，不属于库
 ```
 
 `epub/` 有自己的 `go.mod` 和 [`epub/README.md`](epub/README.md)，不在根 `go test ./...` 里。
@@ -173,12 +174,36 @@ shaped 行，命中不增加 `Engine.shapes`。
 
 - **单核与 Blink 同级**：59.1 vs 58.5 ms；8/16 worker 快 4.2×（14.1 / 13.7 ms）。
 - **行高重排快 22×**：1.1 vs 24.3 ms。`LineHeight` 不在 `BreakKey` 里，一次 shaping 都不做。
+- **分段不做 bidi**：纯 LTR 文本自己按 script+face 切分（`render/segment.go`），复杂脚本与
+  双向控制符回落 go-text 的 `Segmenter`。中文段落上这一步从 39.7 B/rune 的分配降到 0，
+  10 MB 文本每次布局少分配约 120 MB。
+- **布局内存 3.9 B/rune**（500 万字 = 18 MB，改动前 13.2 B/rune / 64 MB）。段落不保留
+  `[]rune` 拷贝，行盒 20 B（`start`/`x`/`avail`/`last`/`align` 由样式推导），flow 只存
+  每项 4 B 的 y 与 4 B 的 unit 下标，`flowItem` 按需物化。
 - **wasm 单线程比原生慢 4.6×**（269.6 ms）：这是运行时不是算法，所以在浏览器里跑 layx
   目前比浏览器自己的排版慢；作为原生库嵌进阅读器才与 Blink 同级。
 
 数字由脚本现场测量，不要跨组比较：`scripts/ab.sh`（浏览器侧）、`tools/bench_native`
 （原生侧，同一份字体字节）、`go test ./render -run '^$' -bench 'BenchmarkLayout5M|BenchmarkRelayout'`
 （500 万字）。
+
+内存用 `tools/memreport` 量，它按宿主的方式建文档、排版、画几页并改几次字号，打印存活堆、
+向系统申请的堆、分配 churn 与峰值 RSS（任务管理器看到的那个数）：
+
+```sh
+go run ./tools/memreport -chars 3300000 -turns 5     # 10 MB 纯文本，改 5 次字号
+go run ./tools/memreport -chars 3300000 -profile /tmp/alloc.pprof   # 分配归因
+go run ./tools/memreport -chars 3300000 -live-profile /tmp/live.pprof   # 存活堆归因
+```
+
+10 MB 中文纯文本（330 万字 / 2 万段 / 100 章）的 A/B：
+
+| | 改前 | 改后 |
+|---|---|---|
+| Layout 存活堆 | 80 MB | 52 MB |
+| 单次 Layout 分配 churn | 577 MB | 404 MB |
+| 峰值 RSS（一次布局） | 145 MB | 109 MB |
+| 峰值 RSS（改 5 次字号后） | 375 MB | 232 MB |
 
 ## 验证
 
@@ -187,6 +212,9 @@ go test ./... -count=1
 go test ./render -race -count=1
 go vet ./...
 ```
+
+`render/mem_test.go` 是内存闸门：它断言 100 万字文档的布局不超过 6 B/rune（当前约 3.9），
+并把实测值打进日志；没有 CJK 字体时跳过。
 
 对照脚本需要 `curl` 和 Chrome/Chromium（或 `CHROME=/path/to/chrome`）：
 
@@ -212,9 +240,13 @@ go vet ./...
 - 断字默认关闭，需同时给 `LayoutOptions.Hyphenator`（如 `hyphenen.New()`）和块样式
   `Style.Hyphenate: true`。
 - 分页暂按行边界，复杂 `break-inside` 与跨页图片策略仍需细化。
-- `Layout` 常驻整本书的行盒与 flow：几十万字的长篇会到几百 MB。按阅读窗口淘汰 flow
-  的实现实测收益不足，已移除；要控住内存，目前的做法是宿主按章拆分 `Document` 再分别
-  `Layout`。
+- `Layout` 常驻整本书的行盒与 flow，约 4 B/字：一百万字的书约 4 MB。剩下的大头不在
+  布局里，而在 `Document`（原文）与 `FontSet`（字体字节 + go-text 解析出的 glyf 表，
+  一套中文字体约 20 MB，**每个 Engine 共享一份，不要按书或按字号重建**）。
+- 峰值 RSS 主要由单次布局的分配 churn 决定（Go 的 GC 让堆长到存活集的 2 倍左右），
+  churn 里约一半是 go-text 的 shaping 与 bidi 之外无法再省的部分。宿主若在 Windows 上
+  看到远大于此的数字，先确认没有按字号重建 `FontSet`、没有把 `TileHeight` 设成整本书
+  高度（一个 tile 的显示列表就是全书字形），再用 `tools/memreport` 对齐量一次。
 - `examples/wasm` 的 demo 在改字号/行高时仍走冷布局；benchmark 路径已走 `Relayout`。
 
 ## 许可

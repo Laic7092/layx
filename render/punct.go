@@ -148,8 +148,7 @@ func (c *glyphCursor) find(target int) (*shapedRun, *shaping.Glyph) {
 // touched, but the pairs straddling a range boundary are considered, so a
 // per-line shaping reproduces exactly the advances the wrap pass measured for
 // the glyphs on that line.
-func (w *textWorker) compressPunctuation(p *paragraph, runs []shapedRun, start, end int) {
-	text := p.text
+func (w *textWorker) compressPunctuation(text []rune, runs []shapedRun, start, end int) {
 	if len(text) < 2 || len(runs) == 0 {
 		return
 	}

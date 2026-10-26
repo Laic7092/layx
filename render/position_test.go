@@ -11,8 +11,9 @@ import (
 
 // locForParaRune returns a Location pointing at absolute paragraph rune pos.
 func locForParaRune(cf *chapterFlow, ci, pos int) (Location, bool) {
-	for idx := range cf.items {
-		it := &cf.items[idx]
+	items := itemsOf(cf)
+	for idx := range items {
+		it := &items[idx]
 		if it.para == nil || pos < int(it.start) || pos >= int(it.end) {
 			continue
 		}
@@ -50,11 +51,12 @@ func TestSelectionQuadsMatchFlow(t *testing.T) {
 
 	firstCF := &paged.chapters[0]
 	lastCF := &paged.chapters[len(paged.chapters)-1]
-	from, ok := locForParaRune(firstCF, 0, int(firstCF.items[0].start))
+	from, ok := locForParaRune(firstCF, 0, int(itemsOf(firstCF)[0].start))
 	if !ok {
 		t.Fatal("no location for the first rune")
 	}
-	last := &lastCF.items[len(lastCF.items)-1]
+	lastIt := itemsOf(lastCF)[lastCF.count()-1]
+	last := &lastIt
 	to, ok := locForParaRune(lastCF, len(paged.chapters)-1, int(last.end)-1)
 	if !ok {
 		t.Fatal("no location for the last rune")
@@ -68,8 +70,9 @@ func TestSelectionQuadsMatchFlow(t *testing.T) {
 	var want []wantQuad
 	for ci := range paged.chapters {
 		cf := &paged.chapters[ci]
-		for idx := range cf.items {
-			it := &cf.items[idx]
+		items := itemsOf(cf)
+		for idx := range items {
+			it := &items[idx]
 			if it.kind != itemLine {
 				continue
 			}
@@ -171,7 +174,7 @@ func TestSelectionContentMatchesOffsetOf(t *testing.T) {
 			checked := 0
 			for ci := range l.chapters {
 				cf := &l.chapters[ci]
-				for idx := 0; idx < len(cf.items); idx += 2 {
+				for idx := 0; idx < cf.count(); idx += 2 {
 					from, ok := locForLineStart(cf, ci, idx)
 					if !ok {
 						continue
@@ -237,7 +240,7 @@ func TestSelectionScrollTiles(t *testing.T) {
 	if !ok {
 		t.Fatal("no line in second chapter")
 	}
-	to, ok := locForParaRune(cf, 1, int(cf.items[0].end)-1)
+	to, ok := locForParaRune(cf, 1, int(itemsOf(cf)[0].end)-1)
 	if !ok {
 		t.Fatal("no rune location in second chapter")
 	}
@@ -304,7 +307,7 @@ func TestChapterPageRanges(t *testing.T) {
 			multi = true
 		}
 		cf := &paged.chapters[ci]
-		if len(cf.items) == 0 {
+		if cf.count() == 0 {
 			t.Fatalf("chapter %d: fixture has no flow", ci)
 		}
 		firstLoc, ok := locForLineStart(cf, ci, 0)
@@ -314,7 +317,8 @@ func TestChapterPageRanges(t *testing.T) {
 		if p, ok := paged.PageOf(firstLoc); !ok || p != first {
 			t.Fatalf("chapter %d: first line page = %d (%v), want %d", ci, p, ok, first)
 		}
-		lastItem := &cf.items[len(cf.items)-1]
+		lastIt := itemsOf(cf)[cf.count()-1]
+		lastItem := &lastIt
 		lastLoc, ok := locForParaRune(cf, ci, int(lastItem.end)-1)
 		if !ok {
 			t.Fatalf("chapter %d: no last rune location", ci)
@@ -442,7 +446,7 @@ func TestProgress(t *testing.T) {
 			lines := 0
 			for ci := range l.chapters {
 				cf := &l.chapters[ci]
-				for idx := 0; idx < len(cf.items); idx++ {
+				for idx := 0; idx < cf.count(); idx++ {
 					loc, ok := locForLineStart(cf, ci, idx)
 					if !ok {
 						continue
@@ -656,8 +660,9 @@ func TestSelectionTallImageAndProgress(t *testing.T) {
 			seen := 0
 			for ci := range l.chapters {
 				cf := &l.chapters[ci]
-				for idx := 0; idx < len(cf.items); idx++ {
-					it := &cf.items[idx]
+				items := itemsOf(cf)
+				for idx := 0; idx < len(items); idx++ {
+					it := &items[idx]
 					loc := Location{Chapter: ci, Node: it.node}
 					if it.kind == itemLine {
 						lineLoc, ok := locForLineStart(cf, ci, idx)

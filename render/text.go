@@ -18,17 +18,26 @@ import (
 type paraSeg struct {
 	node  NodeID
 	style Style
-	// start and end are rune offsets into paragraph.text.
+	// text is the segment's source string. Paragraph runes are not retained:
+	// they are materialized on demand from these strings (see paraText), which
+	// keeps a whole book's text out of the layout.
+	text string
+	// start and end are rune offsets into the materialized paragraph text.
 	start, end int32
 	lang       string
 	link       string
 }
 
 type paragraph struct {
-	text []rune
 	segs []paraSeg
+	// runeLen is the length of the materialized text, i.e. the last segment's
+	// end. It is stored so callers do not have to walk the segments.
+	runeLen int32
 	// style is the block style that supplies alignment and indentation.
 	style Style
+	// width is the content width the paragraph was broken at, i.e. the
+	// available width of every line except the indented first one.
+	width float32
 	// hyphPoints are original rune indexes where a hyphen may be appended
 	// when a line breaks there. They are populated only when the block enables
 	// hyphenation; nil means the line breaker may never add a hyphen.
@@ -66,6 +75,45 @@ type textWorker struct {
 	// shapes counts Shaper.Shape calls for layout benchmarks and tests. It is
 	// per Engine; a nil counter disables counting.
 	shapes *atomic.Int64
+	// paraBuf is this worker's scratch buffer for materializing paragraph
+	// runes. It is owned by the worker, so no two goroutines share it.
+	paraBuf []rune
+	// bufPara and bufText memoize the buffer's owner: a page is built line by
+	// line and most of its lines come from one paragraph, so materializing per
+	// line would copy the same text dozens of times.
+	bufPara *paragraph
+	bufText []rune
+	// Segmentation scratch, reused per input run (see segment.go).
+	scriptRuns []shaping.Input
+	faceRuns   []shaping.Input
+	delimStack []delimEntry
+}
+
+// paraText materializes a paragraph's runes into the worker's scratch buffer.
+//
+// Paragraphs do not retain their rune copy: a 5M-rune book would keep 20 MB
+// alive for text the Document already owns. The returned slice is only valid
+// until the next paraText call on the same worker, so callers either use it
+// immediately or copy what they need.
+func (w *textWorker) paraText(p *paragraph) []rune {
+	if w.bufPara == p && w.bufText != nil {
+		return w.bufText
+	}
+	// Grow the buffer to the paragraph length first: append would otherwise
+	// reallocate on every paragraph that is longer than the last one.
+	if n := int(p.runeLen); cap(w.paraBuf) < n {
+		w.paraBuf = make([]rune, 0, n)
+	}
+	buf := w.paraBuf[:0]
+	for si := range p.segs {
+		// A range loop over a string does not allocate, unlike []rune(s).
+		for _, r := range p.segs[si].text {
+			buf = append(buf, r)
+		}
+	}
+	w.paraBuf = buf
+	w.bufPara, w.bufText = p, buf
+	return buf
 }
 
 type fontKey struct {
@@ -158,9 +206,9 @@ type shapedRun struct {
 // shapeRange shapes paragraph runes [start,end). It deliberately does not
 // retain the shaped output beyond the line wrapping / drawing operation: the
 // layout itself stores only line boxes and rune ranges.
-func (w *textWorker) shapeRange(p *paragraph, start, end int, defaultLang language.Language) []shapedRun {
-	start = clampInt(start, 0, len(p.text))
-	end = clampInt(end, start, len(p.text))
+func (w *textWorker) shapeRange(p *paragraph, text []rune, start, end int, defaultLang language.Language) []shapedRun {
+	start = clampInt(start, 0, len(text))
+	end = clampInt(end, start, len(text))
 	if start == end {
 		return nil
 	}
@@ -178,7 +226,7 @@ func (w *textWorker) shapeRange(p *paragraph, start, end int, defaultLang langua
 		}
 		size := resolveFontSize(seg.style, w.typo)
 		in := shaping.Input{
-			Text:      p.text,
+			Text:      text,
 			RunStart:  s,
 			RunEnd:    e,
 			Direction: di.DirectionLTR,
@@ -186,7 +234,7 @@ func (w *textWorker) shapeRange(p *paragraph, start, end int, defaultLang langua
 			Language:  lang,
 		}
 		fm := workerFontmap{faces: w.faces, order: w.order(seg.style)}
-		for _, split := range w.segmenter.Split(in, fm) {
+		for _, split := range w.splitInput(in, fm) {
 			// The wrapper's fit decision subtracts the last glyph's advance
 			// when its Width is zero (it assumes a whitespace glyph). With
 			// ShapeNoExtents every glyph has Width zero, so every line is
@@ -206,12 +254,12 @@ func (w *textWorker) shapeRange(p *paragraph, start, end int, defaultLang langua
 			out[i].out.AddLetterSpacing(ls, i == 0, i == len(out)-1)
 		}
 	}
-	w.addWordSpacing(p, out)
+	w.addWordSpacing(text, out)
 	if w.typo.Rules.Autospacing {
-		w.addAutospacing(p, out)
+		w.addAutospacing(text, out)
 	}
 	if w.typo.Rules.PunctuationCompression {
-		w.compressPunctuation(p, out, start, end)
+		w.compressPunctuation(text, out, start, end)
 	}
 	return out
 }
@@ -255,7 +303,7 @@ func isWordSpace(r rune) bool {
 // addWordSpacing widens word-separating spaces by Style.WordSpacing. It runs
 // before wrapping, so the extra advance participates in line breaking, and
 // the shaped output is reused by drawing.
-func (w *textWorker) addWordSpacing(p *paragraph, runs []shapedRun) {
+func (w *textWorker) addWordSpacing(text []rune, runs []shapedRun) {
 	for ri := range runs {
 		run := &runs[ri]
 		if run.style.wordSpacing == 0 {
@@ -265,7 +313,7 @@ func (w *textWorker) addWordSpacing(p *paragraph, runs []shapedRun) {
 		for gi := range run.out.Glyphs {
 			g := &run.out.Glyphs[gi]
 			idx := g.TextIndex()
-			if idx < 0 || idx >= len(p.text) || !isWordSpace(p.text[idx]) {
+			if idx < 0 || idx >= len(text) || !isWordSpace(text[idx]) {
 				continue
 			}
 			g.Advance += delta
@@ -279,7 +327,7 @@ func (w *textWorker) addWordSpacing(p *paragraph, runs []shapedRun) {
 // preceding glyph's advance so line wrapping sees the final width. Applied
 // before wrapping, so it also affects where lines break. It only runs when
 // TextRules.Autospacing is set; the gap is not a CSS initial value.
-func (w *textWorker) addAutospacing(p *paragraph, runs []shapedRun) {
+func (w *textWorker) addAutospacing(text []rune, runs []shapedRun) {
 	if len(runs) == 0 {
 		return
 	}
@@ -292,7 +340,7 @@ func (w *textWorker) addAutospacing(p *paragraph, runs []shapedRun) {
 			g := &run.out.Glyphs[gi]
 			if prev != nil {
 				a, b := prev.TextIndex(), g.TextIndex()
-				if b == a+1 && needsAutospace(p.text, a, b) {
+				if b == a+1 && needsAutospace(text, a, b) {
 					prev.Advance += delta
 					prevRun.out.Advance += delta
 				}
@@ -390,18 +438,21 @@ func (w *textWorker) wrapParagraph(
 	defaultLang language.Language,
 ) ([]lineBox, error) {
 	wrapPara := p
+	wrapText := w.paraText(p)
+	p.width = width
 	var (
 		origIndex []int32
 		wrapHyph  map[int32]struct{}
 	)
 	if blockStyle.Hyphenate {
-		if wp, orig, hyph := w.hyphenatedParagraph(p); wp != nil {
+		if wp, wt, orig, hyph := w.hyphenatedParagraph(p, wrapText); wp != nil {
 			wrapPara = wp
+			wrapText = wt
 			origIndex = orig
 			wrapHyph = hyph
 		}
 	}
-	runs := w.shapeRange(wrapPara, 0, len(wrapPara.text), defaultLang)
+	runs := w.shapeRange(wrapPara, wrapText, 0, len(wrapText), defaultLang)
 	if len(runs) == 0 {
 		return nil, nil
 	}
@@ -454,7 +505,7 @@ func (w *textWorker) wrapParagraph(
 	hang := typo.Rules.HangingPunctuation && origIndex == nil && len(wrapHyph) == 0
 	var runeAdv []float32
 	if hang {
-		runeAdv = make([]float32, len(wrapPara.text))
+		runeAdv = make([]float32, len(wrapText))
 		for oi := range outs {
 			for _, g := range outs[oi].Glyphs {
 				idx := g.TextIndex()
@@ -470,8 +521,8 @@ func (w *textWorker) wrapParagraph(
 	// makes any line exceed its width, a second pass reserves the widest
 	// hyphen for every line, which guarantees used hyphens fit.
 	wrapOnce := func(pad float32) ([]lineBox, bool, error) {
-		w.wrapper.Prepare(config, wrapPara.text, shaping.NewSliceIterator(outs))
-		lines := make([]lineBox, 0, len(p.text)/24+1)
+		w.wrapper.Prepare(config, wrapText, shaping.NewSliceIterator(outs))
+		lines := make([]lineBox, 0, len(wrapText)/24+1)
 		lineStart := 0
 		// placed is the first rune not yet put on a line. Hanging punctuation
 		// moves a rune or two past the wrapper's break, so following wrapper
@@ -570,7 +621,7 @@ func (w *textWorker) wrapParagraph(
 			// to) stays on this line.
 			startRune := dispStart
 			if hang && !done {
-				if k := hangingPullCount(wrapPara.text, lineEnd); k > 0 {
+				if k := hangingPullCount(wrapText, lineEnd); k > 0 {
 					adv := float32(0)
 					for i := 0; i < k; i++ {
 						adv += runeAdv[lineEnd+i]
@@ -579,7 +630,7 @@ func (w *textWorker) wrapParagraph(
 					if over <= 0 || over <= 0.5*runeAdv[lineEnd+k-1]+0.01 {
 						lineWidth += adv
 						lineEnd += k
-						if lineEnd >= len(wrapPara.text) {
+						if lineEnd >= len(wrapText) {
 							done = true
 						}
 					}
@@ -664,6 +715,30 @@ func clampInt(v, lo, hi int) int {
 		return hi
 	}
 	return v
+}
+
+// clampF16 narrows a metric to the range lineBreak stores. Line bounds are
+// within a few hundred pixels in practice; clamping keeps a pathological font
+// from wrapping around.
+func clampF16(v float32) int16 {
+	if v > 32767 {
+		return 32767
+	}
+	if v < -32768 {
+		return -32768
+	}
+	return int16(v)
+}
+
+// clampI16 narrows a count (widows/orphans) to the range breakUnit stores.
+func clampI16(v int) int16 {
+	if v > 32767 {
+		return 32767
+	}
+	if v < -32768 {
+		return -32768
+	}
+	return int16(v)
 }
 
 func minInt(a, b int) int {

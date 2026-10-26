@@ -83,18 +83,54 @@ type anchorPos struct {
 	offset  int
 }
 
+// laidUnit is one placed leaf break unit: a paragraph's lines or an image.
+// Units are kept in flow order and their items are contiguous, so an item
+// index maps to a unit by binary search over first.
+type laidUnit struct {
+	unit  *breakUnit
+	x     float32
+	first int32
+	group int32
+	flags uint8
+}
+
+// Flags of a laidUnit. They mirror the former per-item flowItem booleans.
+const (
+	unitBreakBefore uint8 = 1 << iota
+	unitBreakAfter
+	unitKeepTogether
+)
+
+// chapterFlow is a chapter with vertical positions and a page map.
+//
+// It does not store a flowItem per line. A line's y is the only value that
+// depends on the vertical typography, so the flow is ys (4 bytes per item)
+// plus the placed units; start, alignment, available width, baseline and the
+// per-page flags are derived from the cached break data by item. A 5M-rune book
+// keeps ~180k lines, and a full flowItem per line cost 20 MB for data that was
+// already in the line boxes.
 type chapterFlow struct {
 	chapter Chapter
-	items   []flowItem
-	paras   []*paragraph
+	units   []laidUnit
+	ys      []float32
+	// unitOf is the index in units of each item. It costs 4 bytes per item and
+	// turns item lookup into one array read: locating the unit by binary search
+	// on every item made page building, hit testing and pagination measurably
+	// slower than the former materialized flow.
+	unitOf []int32
+	// lineHeight is Typography.LineHeight for this flow; line metrics are
+	// re-derived from it when an item is materialized.
+	lineHeight float32
 	// boxes are block border/background rectangles in chapter content
 	// coordinates. Unstyled documents leave this empty.
 	boxes []blockRect
 
 	placements []paraPlacement
-	nodePlace  map[NodeID]int32
-	nodeFirst  map[NodeID]int32
-	nodeAnchor map[NodeID]AnchorID
+	// nodePlace, nodeFirst and nodeAnchor are indexed by NodeID, or nil when
+	// the chapter has no nodes of that kind. A negative entry means "absent".
+	nodePlace  []int32
+	nodeFirst  []int32
+	nodeAnchor []AnchorID
 	anchors    map[AnchorID]anchorPos
 	height     float32
 	pages      []pageInfo
@@ -337,7 +373,7 @@ func (e *Engine) layoutDoc(ctx context.Context, doc *Document, opts LayoutOption
 
 	// Pass 3: reuse complete page maps when PageKey is unchanged, otherwise
 	// re-stack the cached line boxes and re-paginate.
-	laid := make([]*laidChapter, nch)
+	laid := make([]*chapterFlow, nch)
 	needPage := make([]bool, nch)
 	for ci := 0; ci < nch; ci++ {
 		key := cacheKey{chapter: ci, fonts: opts.Fonts, key: pageKeys[ci]}
@@ -385,8 +421,10 @@ func (e *Engine) layoutDoc(ctx context.Context, doc *Document, opts LayoutOption
 		lc := laid[ci]
 		cf := chapterFlow{
 			chapter:    *ch,
-			items:      lc.items,
-			paras:      lc.paras,
+			units:      lc.units,
+			ys:         lc.ys,
+			unitOf:     lc.unitOf,
+			lineHeight: lc.lineHeight,
 			boxes:      lc.boxes,
 			placements: lc.placements,
 			nodePlace:  lc.nodePlace,
@@ -421,46 +459,33 @@ func (e *Engine) layChapter(
 	typo Typography,
 	contentH float32,
 	availW float32,
-) (*laidChapter, error) {
+) (*chapterFlow, error) {
 	stackStart := e.mark()
-	items, paras, height, boxes := stackBreakUnits(bc.units, typo.ParagraphGap, typo)
 	bt, _, bb, bl := borderWidths(rootStyle)
 	xShift := rootStyle.MarginLeft + bl
 	yShift := rootStyle.MarginTop + bt
-	for i := range items {
-		items[i].x += xShift
-		items[i].y += yShift
-	}
-	for i := range boxes {
-		boxes[i].x += xShift
-		boxes[i].y += yShift
-	}
+	lc := stackBreakUnits(bc.units, typo.ParagraphGap, typo.LineHeight, xShift, yShift)
 	if boxPaints(rootStyle) {
-		boxes = append(boxes, blockRect{
+		lc.boxes = append(lc.boxes, blockRect{
 			style:  rootStyle,
 			x:      rootStyle.MarginLeft,
 			y:      rootStyle.MarginTop,
 			width:  availW - rootStyle.MarginLeft - rootStyle.MarginRight,
-			height: bt + height + bb,
+			height: bt + lc.height + bb,
 		})
 	}
-	sortBlockRects(boxes)
+	sortBlockRects(lc.boxes)
 
-	place := bc.placementsFor(ch, ci, items, paras)
-	lc := &laidChapter{
-		items:      items,
-		paras:      paras,
-		boxes:      boxes,
-		height:     height + yShift + rootStyle.MarginBottom,
-		placements: place.placements,
-		nodePlace:  place.nodePlace,
-		nodeFirst:  place.nodeFirst,
-		nodeAnchor: place.nodeAnchor,
-		anchors:    place.anchors,
-	}
+	place := bc.placementsFor(ch, ci, lc)
+	lc.placements = place.placements
+	lc.nodePlace = place.nodePlace
+	lc.nodeFirst = place.nodeFirst
+	lc.nodeAnchor = place.nodeAnchor
+	lc.anchors = place.anchors
+	lc.height += yShift + rootStyle.MarginBottom
 	e.stop(stackStart, &e.stats.stack)
 	pageStart := e.mark()
-	lc.pages = paginate(ctx, items, contentH, typo)
+	lc.pages = paginate(ctx, lc, contentH, typo)
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -557,20 +582,34 @@ const (
 // lineBreak is one line box without vertical placement. Height and baseline
 // are derived when the line is stacked, so changing LineHeight never requires
 // re-breaking or re-shaping.
+//
+// It stores only what shaping and wrapping produced. The line's start is the
+// previous line's end (wrapping never leaves a gap), its x and available width
+// follow from the block style and whether it is the first line, and last/align
+// follow from the line index and the paragraph style. Storing them cost 20
+// bytes per line of a book with ~180k lines, for values that are rebuilt in a
+// few instructions.
 type lineBreak struct {
-	start, end int32
-	x          float32
-	width      float32
-	avail      float32
-	last       bool
-	align      TextAlign
-
-	ascent  float32
-	descent float32
+	end   int32
+	width float32
+	// ascent and descent are the shaper's line bounds in 1/64 px, which is
+	// exactly what the fixed-point extents carry: no precision is lost.
+	ascent  int16
+	descent int16
 	// implicitSize is the largest font size inheriting Typography.LineHeight;
 	// explicitHeight is the largest size*lineHeight from overriding styles.
 	implicitSize   float32
 	explicitHeight float32
+}
+
+// imagePlacement is the cacheable form of an inline image unit. It is a small
+// struct of its own: embedding a full flowItem here kept a 112-byte item alive
+// per image, most of it line-only fields.
+type imagePlacement struct {
+	node             NodeID
+	image            ImageID
+	x, width, height float32
+	link             string
 }
 
 // breakUnit is one vertical slot in a block: the cacheable result of shaping
@@ -579,7 +618,7 @@ type breakUnit struct {
 	kind  breakKit
 	para  *paragraph
 	lines []lineBreak
-	image flowItem
+	image imagePlacement
 	box   *breakBox
 
 	xOffset      float32
@@ -587,11 +626,12 @@ type breakUnit struct {
 	marginBottom float32
 	// gapBottom means marginBottom is the default paragraph gap, which must be
 	// re-read from the current Typography when the unit is stacked.
-	gapBottom       bool
-	breakBefore     bool
-	breakAfter      bool
-	keepTogether    bool
-	widows, orphans int
+	gapBottom    bool
+	breakBefore  bool
+	breakAfter   bool
+	keepTogether bool
+	widows       int16
+	orphans      int16
 }
 
 // breakBox is a block's break units before they are stacked.
@@ -621,64 +661,76 @@ func unitFromBox(box *breakBox) breakUnit {
 }
 
 // lineMetrics applies the current LineHeight to a cached line.
-func lineMetrics(ln *lineBreak, typo Typography) (height, baseline float32) {
+func lineMetrics(ln *lineBreak, lineHeight float32) (height, baseline float32) {
+	ascent := float32(ln.ascent) / 64
+	descent := float32(ln.descent) / 64
 	lhMax := ln.explicitHeight
 	if ln.implicitSize > 0 {
-		if h := ln.implicitSize * typo.LineHeight; h > lhMax {
+		if h := ln.implicitSize * lineHeight; h > lhMax {
 			lhMax = h
 		}
 	}
 	height = lhMax
-	if minH := ln.ascent + ln.descent; height < minH {
+	if minH := ascent + descent; height < minH {
 		height = minH
 	}
-	leading := height - ln.ascent - ln.descent
+	leading := height - ascent - descent
 	if leading < 0 {
 		leading = 0
 	}
-	baseline = ln.ascent + leading/2
+	baseline = ascent + leading/2
 	return height, baseline
 }
 
-// countBreakUnits sizes the flow item and paragraph slices up front. Without
-// it, every nested block would append into its own growing slice and the
-// parent would copy the result again: on a 5M-rune book that costs hundreds of
+// countBreakUnits sizes the flow item and unit slices up front. Without it,
+// every nested block would append into its own growing slice and the parent
+// would copy the result again: on a 5M-rune book that costs hundreds of
 // megabytes per relayout.
-func countBreakUnits(units []breakUnit) (items, paras int) {
+func countBreakUnits(units []breakUnit) (items, leaves int) {
 	for i := range units {
 		u := &units[i]
 		switch u.kind {
 		case breakLines:
 			items += len(u.lines)
-			if u.para != nil {
-				paras++
-			}
+			leaves++
 		case breakImage:
 			items++
+			leaves++
 		case breakBlockUnit:
-			bi, bp := countBreakUnits(u.box.units)
+			bi, bl := countBreakUnits(u.box.units)
 			items += bi
-			paras += bp
+			leaves += bl
 		}
 	}
-	return items, paras
+	return items, leaves
 }
 
 // stackBreakUnits turns break units into the flow items a page or tile slices.
 // Line heights are read from the current Typography here, which is why a
 // line-height change reuses cached line boxes instead of re-breaking them.
-func stackBreakUnits(units []breakUnit, defaultGap float32, typo Typography) (items []flowItem, paras []*paragraph, height float32, boxes []blockRect) {
-	nItems, nParas := countBreakUnits(units)
-	items = make([]flowItem, 0, nItems)
-	paras = make([]*paragraph, 0, nParas)
-	height = appendBreakUnits(units, defaultGap, typo, &items, &paras, &boxes)
-	return items, paras, height, boxes
+func stackBreakUnits(units []breakUnit, defaultGap, lineHeight, x, y float32) *chapterFlow {
+	nItems, nUnits := countBreakUnits(units)
+	cf := &chapterFlow{
+		lineHeight: lineHeight,
+		ys:         make([]float32, 0, nItems),
+		unitOf:     make([]int32, 0, nItems),
+		units:      make([]laidUnit, 0, nUnits),
+	}
+	cf.height = appendBreakUnits(units, defaultGap, lineHeight, x, y, cf)
+	return cf
 }
 
-func appendBreakUnits(units []breakUnit, defaultGap float32, typo Typography, items *[]flowItem, paras *[]*paragraph, boxes *[]blockRect) float32 {
+// appendBreakUnits walks one level of the unit tree, placing every leaf unit at
+// an absolute x/y. It appends to the flow's unit list, item tops and block
+// boxes and returns the height of this level.
+//
+// Only the item's top is stored: line boxes, alignment, available width,
+// baselines and the break/keep flags are all derivable from the cached break
+// data, which is what lets a chapter flow cost 4 bytes per line instead of a
+// full flowItem.
+func appendBreakUnits(units []breakUnit, defaultGap, lineHeight, x, y float32, cf *chapterFlow) float32 {
 	cursor := float32(0)
 	prevBottom := float32(0)
-	start := len(*items)
 	for i := range units {
 		u := &units[i]
 		bottom := u.marginBottom
@@ -693,87 +745,202 @@ func appendBreakUnits(units []breakUnit, defaultGap float32, typo Typography, it
 			}
 		}
 		cursor += gap
-		base := len(*items)
-		// keepGroup is local to this unit list, matching stackUnits' use of
-		// the index inside the nested slice.
-		group := int32(base - start)
+		mark := len(cf.units)
+		// The group only has to distinguish adjacent keep-together units.
+		group := int32(mark)
 		switch u.kind {
 		case breakLines:
-			y := float32(0)
+			ui := int32(len(cf.units))
+			first := len(cf.ys)
+			top := y + cursor
 			for li := range u.lines {
-				ln := &u.lines[li]
-				h, baseline := lineMetrics(ln, typo)
-				*items = append(*items, flowItem{
-					kind:      itemLine,
-					para:      u.para,
-					start:     ln.start,
-					end:       ln.end,
-					x:         ln.x + u.xOffset,
-					y:         cursor + y,
-					width:     ln.width,
-					avail:     ln.avail,
-					height:    h,
-					baseline:  baseline,
-					last:      ln.last,
-					align:     ln.align,
-					paraLine:  int32(li),
-					paraLines: int32(len(u.lines)),
-					widows:    u.widows,
-					orphans:   u.orphans,
-				})
-				y += h
+				cf.ys = append(cf.ys, top)
+				cf.unitOf = append(cf.unitOf, ui)
+				h, _ := lineMetrics(&u.lines[li], lineHeight)
+				top += h
 			}
-			cursor += y
-			if u.para != nil {
-				*paras = append(*paras, u.para)
-			}
+			cf.units = append(cf.units, laidUnit{
+				unit: u, x: x, first: int32(first), group: group, flags: unitFlags(u),
+			})
+			cursor = top - y
 		case breakImage:
-			it := u.image
-			it.x += u.xOffset
-			it.y += cursor
-			*items = append(*items, it)
-			cursor += it.height
+			cf.ys = append(cf.ys, y+cursor)
+			cf.unitOf = append(cf.unitOf, int32(len(cf.units)))
+			cf.units = append(cf.units, laidUnit{
+				unit: u, x: x, first: int32(len(cf.ys) - 1), group: group, flags: unitFlags(u),
+			})
+			cursor += u.image.height
 		case breakBlockUnit:
-			mark := len(*items)
-			markBoxes := len(*boxes)
 			bTop, bRight, bBottom, bLeft := borderWidths(u.box.style)
-			bh := appendBreakUnits(u.box.units, defaultGap, typo, items, paras, boxes)
-			for j := mark; j < len(*items); j++ {
-				(*items)[j].x += u.xOffset
-				(*items)[j].y += cursor + bTop
-			}
-			for j := markBoxes; j < len(*boxes); j++ {
-				(*boxes)[j].x += u.xOffset
-				(*boxes)[j].y += cursor + bTop
-			}
+			inner := appendBreakUnits(u.box.units, defaultGap, lineHeight, x+u.xOffset, y+cursor+bTop, cf)
 			if boxPaints(u.box.style) {
-				*boxes = append(*boxes, blockRect{
+				cf.boxes = append(cf.boxes, blockRect{
 					style:  u.box.style,
-					x:      u.xOffset - bLeft,
-					y:      cursor,
+					x:      x + u.xOffset - bLeft,
+					y:      y + cursor,
 					width:  u.box.width + bLeft + bRight,
-					height: bTop + bh + bBottom,
+					height: bTop + inner + bBottom,
 				})
 			}
-			cursor += bTop + bh + bBottom
+			cursor += bTop + inner + bBottom
 		}
-		if len(*items) > base {
+		if len(cf.units) > mark {
 			if u.breakBefore {
-				(*items)[base].breakBefore = true
+				cf.units[mark].flags |= unitBreakBefore
 			}
 			if u.breakAfter {
-				(*items)[len(*items)-1].breakAfter = true
+				cf.units[len(cf.units)-1].flags |= unitBreakAfter
 			}
 			if u.keepTogether {
-				for k := base; k < len(*items); k++ {
-					(*items)[k].keepTogether = true
-					(*items)[k].keepGroup = group
+				for k := mark; k < len(cf.units); k++ {
+					cf.units[k].flags |= unitKeepTogether
+					cf.units[k].group = group
 				}
 			}
 		}
 		prevBottom = bottom
 	}
 	return cursor
+}
+
+// unitFlags converts a unit's own break flags into laidUnit flags.
+func unitFlags(u *breakUnit) uint8 {
+	var f uint8
+	if u.breakBefore {
+		f |= unitBreakBefore
+	}
+	if u.breakAfter {
+		f |= unitBreakAfter
+	}
+	if u.keepTogether {
+		f |= unitKeepTogether
+	}
+	return f
+}
+
+// count returns the number of flow items in the chapter.
+func (cf *chapterFlow) count() int { return len(cf.ys) }
+
+// locate maps an item index to its unit and to the line index inside it.
+func (cf *chapterFlow) locate(i int) (unit, line int) {
+	u := cf.unitOf[i]
+	return int(u), i - int(cf.units[u].first)
+}
+
+// item materializes one flow item from the placed units and the line boxes.
+//
+// The returned value is exactly what the stacking pass used to store, so every
+// consumer (drawing, hit testing, selection, pagination) keeps its semantics.
+func (cf *chapterFlow) item(i int) flowItem {
+	if i < 0 || i >= len(cf.ys) {
+		return flowItem{}
+	}
+	u, li := cf.locate(i)
+	lu := &cf.units[u]
+	var it flowItem
+	if lu.unit.kind == breakImage {
+		img := &lu.unit.image
+		it = flowItem{
+			kind: itemImage, node: img.node, image: img.image,
+			x: lu.x + img.x, width: img.width, height: img.height, link: img.link,
+		}
+	} else {
+		p := lu.unit.para
+		lines := lu.unit.lines
+		ln := &lines[li]
+		start := int32(0)
+		if li > 0 {
+			start = lines[li-1].end
+		}
+		indent := float32(0)
+		if li == 0 {
+			if indent = p.style.FirstLineIndent; indent < 0 {
+				indent = 0
+			}
+		}
+		avail := p.width - indent
+		height, baseline := lineMetrics(ln, cf.lineHeight)
+		it = flowItem{
+			kind: itemLine, para: p, start: start, end: ln.end,
+			x:     lu.x + lineX(p.style.TextAlign, avail, ln.width) + indent,
+			width: ln.width, avail: avail, height: height, baseline: baseline,
+			last:     li == len(lines)-1,
+			align:    p.style.TextAlign,
+			paraLine: int32(li), paraLines: int32(len(lines)),
+			widows: int(lu.unit.widows), orphans: int(lu.unit.orphans),
+		}
+		if li == 0 {
+			it.breakBefore = lu.flags&unitBreakBefore != 0
+		}
+		if li == len(lines)-1 {
+			it.breakAfter = lu.flags&unitBreakAfter != 0
+		}
+	}
+	it.y = cf.ys[i]
+	it.keepTogether = lu.flags&unitKeepTogether != 0
+	it.keepGroup = lu.group
+	return it
+}
+
+// itemExtent is the geometry hit testing needs, without materializing a whole
+// flowItem: a page's hit test scans every item on it, and the full item is only
+// built for the winner.
+type itemExtent struct {
+	kind                       itemKind
+	x, y, width, avail, height float32
+}
+
+// itemExtent returns the extent of item i inside a placed unit. li is the
+// line index inside that unit, which callers walking a unit already know.
+func (cf *chapterFlow) unitExtent(u, li, i int) itemExtent {
+	lu := &cf.units[u]
+	if lu.unit.kind == breakImage {
+		return itemExtent{kind: itemImage, x: lu.x + lu.unit.image.x, y: cf.ys[i],
+			width: lu.unit.image.width, height: lu.unit.image.height}
+	}
+	p := lu.unit.para
+	ln := &lu.unit.lines[li]
+	indent := float32(0)
+	if li == 0 {
+		if indent = p.style.FirstLineIndent; indent < 0 {
+			indent = 0
+		}
+	}
+	avail := p.width - indent
+	h, _ := lineMetrics(ln, cf.lineHeight)
+	return itemExtent{
+		kind: itemLine, x: lu.x + lineX(p.style.TextAlign, avail, ln.width) + indent,
+		y: cf.ys[i], width: ln.width, avail: avail, height: h,
+	}
+}
+
+// itemCount returns the number of items a placed unit contributes.
+func (lu *laidUnit) itemCount() int {
+	if lu.unit.kind == breakImage {
+		return 1
+	}
+	return len(lu.unit.lines)
+}
+
+// itemBottom returns the bottom edge of an item without materializing it.
+func (cf *chapterFlow) itemBottom(i int) float32 {
+	u, li := cf.locate(i)
+	if cf.units[u].unit.kind == breakImage {
+		return cf.ys[i] + cf.units[u].unit.image.height
+	}
+	h, _ := lineMetrics(&cf.units[u].unit.lines[li], cf.lineHeight)
+	return cf.ys[i] + h
+}
+
+// lineX returns a line's offset inside its available width for an alignment.
+func lineX(align TextAlign, avail, width float32) float32 {
+	switch align {
+	case AlignRight:
+		return avail - width
+	case AlignCenter:
+		return (avail - width) / 2
+	}
+	return 0
 }
 
 // breakContext is the per-task state for shaping and line breaking. It only
@@ -888,15 +1055,17 @@ func (bc *breakContext) tokens(tokens []inlineToken, width float32, blockStyle S
 			p := &paragraph{style: blockStyle}
 			for k := i; k < j; k++ {
 				t := &tokens[k]
-				start := int32(len(p.text))
-				p.text = append(p.text, t.text...)
+				start := p.runeLen
+				// The segment keeps the source string; the runes are
+				// materialized on demand instead of being copied per paragraph.
+				p.runeLen += int32(utf8.RuneCountInString(t.text))
 				st := t.style
 				// Vertical styling is re-applied at stack time. Store only the
 				// document's explicit multiplier (zero means "inherit typo").
 				st.LineHeight = bc.explicitLH[t.node]
 				p.segs = append(p.segs, paraSeg{
-					node: t.node, style: st,
-					start: start, end: int32(len(p.text)),
+					node: t.node, style: st, text: t.text,
+					start: start, end: p.runeLen,
 					lang: t.lang, link: t.link,
 				})
 			}
@@ -908,24 +1077,20 @@ func (bc *breakContext) tokens(tokens []inlineToken, width float32, blockStyle S
 				u := breakUnit{
 					kind:    breakLines,
 					para:    p,
-					widows:  blockStyle.Widows,
-					orphans: blockStyle.Orphans,
+					widows:  clampI16(blockStyle.Widows),
+					orphans: clampI16(blockStyle.Orphans),
 				}
+				u.lines = make([]lineBreak, len(lines))
 				for li := range lines {
 					ln := &lines[li]
-					u.lines = append(u.lines, lineBreak{
-						start:          ln.start,
+					u.lines[li] = lineBreak{
 						end:            ln.end,
-						x:              ln.x,
 						width:          ln.width,
-						avail:          ln.avail,
-						last:           ln.last,
-						align:          ln.align,
-						ascent:         ln.ascent,
-						descent:        ln.descent,
+						ascent:         clampF16(ln.ascent),
+						descent:        clampF16(ln.descent),
 						implicitSize:   ln.implicitSize,
 						explicitHeight: ln.explicitHeight,
-					})
+					}
 				}
 				if j < len(tokens) && tokens[j].kind == tokenBreak {
 					u.marginBottom = 0
@@ -970,8 +1135,8 @@ func (bc *breakContext) imageUnit(tok *inlineToken, width float32, blockStyle St
 	case AlignCenter:
 		x = (width - w) / 2
 	}
-	it := flowItem{
-		kind: itemImage, node: tok.node, image: tok.image,
+	it := imagePlacement{
+		node: tok.node, image: tok.image,
 		x: x, width: w, height: h, link: tok.link,
 	}
 	return breakUnit{kind: breakImage, image: it}, true, nil
@@ -980,22 +1145,23 @@ func (bc *breakContext) imageUnit(tok *inlineToken, width float32, blockStyle St
 // placementsFor computes the node/anchor maps once per BreakKey. Item order is
 // identical for every PageKey derived from the same line boxes, so a
 // LineHeight or paragraph-gap change does not repeat this O(lines) work.
-func (bc *breakChapter) placementsFor(ch *Chapter, ci int, items []flowItem, paras []*paragraph) *chapterPlacements {
+func (bc *breakChapter) placementsFor(ch *Chapter, ci int, flow *chapterFlow) *chapterPlacements {
 	bc.placeOnce.Do(func() {
 		cf := chapterFlow{
 			chapter:    *ch,
-			items:      items,
-			paras:      paras,
-			nodePlace:  make(map[NodeID]int32, len(ch.Nodes)),
-			nodeFirst:  make(map[NodeID]int32, len(ch.Nodes)),
-			nodeAnchor: make(map[NodeID]AnchorID, len(ch.Anchors)),
+			units:      flow.units,
+			ys:         flow.ys,
+			unitOf:     flow.unitOf,
+			nodePlace:  absentInt32(len(ch.Nodes)),
+			nodeFirst:  absentInt32(len(ch.Nodes)),
+			nodeAnchor: make([]AnchorID, len(ch.Nodes)),
 			anchors:    make(map[AnchorID]anchorPos, len(ch.Anchors)),
 		}
 		buildPlacements(&cf)
 		for id, node := range ch.Anchors {
 			pos := anchorPos{chapter: ci, node: node, offset: 0}
 			cf.anchors[id] = pos
-			if cur, exists := cf.nodeAnchor[node]; !exists || id < cur {
+			if cur := cf.nodeAnchor[node]; cur == NoAnchor || id < cur {
 				cf.nodeAnchor[node] = id
 			}
 		}
@@ -1010,6 +1176,15 @@ func (bc *breakChapter) placementsFor(ch *Chapter, ci int, items []flowItem, par
 	return bc.place
 }
 
+// absentInt32 returns a node-indexed table whose entries all mean "absent".
+func absentInt32(n int) []int32 {
+	out := make([]int32, n)
+	for i := range out {
+		out[i] = -1
+	}
+	return out
+}
+
 func buildPlacements(cf *chapterFlow) {
 	parents := make(map[NodeID]NodeID, len(cf.chapter.Nodes))
 	for i := range cf.chapter.Nodes {
@@ -1017,38 +1192,48 @@ func buildPlacements(cf *chapterFlow) {
 			parents[c] = NodeID(i)
 		}
 	}
-	byPara := make(map[*paragraph]int, len(cf.paras))
-	cf.placements = make([]paraPlacement, 0, len(cf.paras))
-	for idx, it := range cf.items {
-		switch it.kind {
-		case itemLine:
-			pi, ok := byPara[it.para]
-			if !ok {
-				pi = len(cf.placements)
-				byPara[it.para] = pi
-				cf.placements = append(cf.placements, paraPlacement{para: it.para, firstItem: idx})
-			}
-			cf.placements[pi].lineCount++
-			for si := range it.para.segs {
-				seg := &it.para.segs[si]
-				if int(seg.end) <= int(it.start) || int(seg.start) >= int(it.end) {
+	byPara := make(map[*paragraph]int, len(cf.chapter.Nodes))
+	cf.placements = make([]paraPlacement, 0, len(cf.chapter.Nodes))
+	base := 0
+	for ui := range cf.units {
+		lu := &cf.units[ui]
+		u := lu.unit
+		if u.kind != breakLines {
+			markNodeFirst(cf, parents, u.image.node, base)
+			base++
+			continue
+		}
+		pi, ok := byPara[u.para]
+		if !ok {
+			pi = len(cf.placements)
+			byPara[u.para] = pi
+			cf.placements = append(cf.placements, paraPlacement{para: u.para, firstItem: int(lu.first)})
+		}
+		cf.placements[pi].lineCount += len(u.lines)
+		start := int32(0)
+		for li := range u.lines {
+			end := u.lines[li].end
+			idx := base + li
+			for si := range u.para.segs {
+				seg := &u.para.segs[si]
+				if int(seg.end) <= int(start) || int(seg.start) >= int(end) {
 					continue
 				}
 				cf.nodePlace[seg.node] = int32(pi)
 				markNodeFirst(cf, parents, seg.node, idx)
 			}
-		case itemImage:
-			markNodeFirst(cf, parents, it.node, idx)
+			start = end
 		}
+		base += len(u.lines)
 	}
 }
 
 func markNodeFirst(cf *chapterFlow, parents map[NodeID]NodeID, node NodeID, idx int) {
 	for node != InvalidNode {
-		if _, ok := cf.nodeFirst[node]; ok {
+		if cur := cf.nodeFirst[node]; cur >= 0 {
 			// Ancestors closer to the root were already visited at an earlier
 			// or equal item index.
-			if cf.nodeFirst[node] <= int32(idx) {
+			if cur <= int32(idx) {
 				return
 			}
 		}
@@ -1061,38 +1246,90 @@ func markNodeFirst(cf *chapterFlow, parents map[NodeID]NodeID, node NodeID, idx 
 	}
 }
 
+// pageItem is the part of a flow item pagination needs. Materializing a full
+// flowItem would be wasteful in this loop: it runs once per line of the book.
+type pageItem struct {
+	y, height           float32
+	para                *paragraph
+	paraLine, paraLines int32
+	breakBefore         bool
+	breakAfter          bool
+	keepTogether        bool
+	keepGroup           int32
+	widows, orphans     int
+}
+
+// pageView is the sequential view of a chapter flow used by paginate.
+func (cf *chapterFlow) pageItem(i int) pageItem {
+	u, li := cf.locate(i)
+	lu := &cf.units[u]
+	pi := pageItem{
+		y:            cf.ys[i],
+		keepTogether: lu.flags&unitKeepTogether != 0,
+		keepGroup:    lu.group,
+	}
+	if lu.unit.kind == breakImage {
+		pi.height = lu.unit.image.height
+		return pi
+	}
+	lines := lu.unit.lines
+	h, _ := lineMetrics(&lines[li], cf.lineHeight)
+	pi.height = h
+	pi.para = lu.unit.para
+	pi.paraLine = int32(li)
+	pi.paraLines = int32(len(lines))
+	pi.widows = int(lu.unit.widows)
+	pi.orphans = int(lu.unit.orphans)
+	if li == 0 {
+		pi.breakBefore = lu.flags&unitBreakBefore != 0
+	}
+	if li == len(lines)-1 {
+		pi.breakAfter = lu.flags&unitBreakAfter != 0
+	}
+	return pi
+}
+
 // paginate slices a flowed chapter into pages. Page top values are absolute
 // chapter content coordinates.
-func paginate(ctx context.Context, items []flowItem, pageHeight float32, typo Typography) []pageInfo {
+func paginate(ctx context.Context, cf *chapterFlow, pageHeight float32, typo Typography) []pageInfo {
+	return paginateN(ctx, cf.count(), cf.pageItem, pageHeight, typo)
+}
+
+// paginateN is paginate over an item accessor, so the pagination rules can be
+// tested without building a whole chapter flow.
+func paginateN(ctx context.Context, n int, at func(int) pageItem, pageHeight float32, typo Typography) []pageInfo {
 	typo.Rules = typo.Rules.withDefaults()
-	if len(items) == 0 {
+	if n == 0 {
 		return []pageInfo{{chapter: 0, first: 0, last: 0, top: 0}}
 	}
 	const eps = 0.01
-	pages := make([]pageInfo, 0, len(items)/20+1)
+	pages := make([]pageInfo, 0, n/20+1)
 	first := 0
 	i := 0
 	pageTop := float32(0)
-	for i < len(items) {
+	it := at(0)
+	for i < n {
 		if i%2048 == 0 && ctx.Err() != nil {
 			return pages
 		}
-		if i > first && items[i].breakBefore {
+		if i > first && it.breakBefore {
 			pages = append(pages, pageInfo{first: first, last: i, top: pageTop})
 			first = i
-			pageTop = items[i].y
+			pageTop = it.y
 			continue
 		}
-		if i > first && items[i-1].breakAfter {
+		if i > first && at(i-1).breakAfter {
 			pages = append(pages, pageInfo{first: first, last: i, top: pageTop})
 			first = i
-			pageTop = items[i].y
+			pageTop = it.y
 			continue
 		}
-		it := &items[i]
 		limit := pageTop + pageHeight
 		if i == first || it.y+it.height <= limit+eps {
 			i++
+			if i < n {
+				it = at(i)
+			}
 			continue
 		}
 
@@ -1100,7 +1337,7 @@ func paginate(ctx context.Context, items []flowItem, pageHeight float32, typo Ty
 		// Keep the entire block together when possible.
 		if it.keepTogether && it.keepGroup != 0 && i > first {
 			start := i
-			for start > first && items[start-1].keepTogether && items[start-1].keepGroup == it.keepGroup {
+			for start > first && at(start-1).keepTogether && at(start-1).keepGroup == it.keepGroup {
 				start--
 			}
 			if start > first {
@@ -1128,9 +1365,11 @@ func paginate(ctx context.Context, items []flowItem, pageHeight float32, typo Ty
 				}
 			} else if remain := total - pl; remain < widows {
 				cand := i + (widows - remain)
-				if cand > i && cand <= len(items) &&
-					items[cand-1].y+items[cand-1].height <= limit+eps {
-					breakAt = cand
+				if cand > i && cand <= n {
+					prev := at(cand - 1)
+					if prev.y+prev.height <= limit+eps {
+						breakAt = cand
+					}
 				}
 			}
 		}
@@ -1139,10 +1378,13 @@ func paginate(ctx context.Context, items []flowItem, pageHeight float32, typo Ty
 		}
 		pages = append(pages, pageInfo{first: first, last: breakAt, top: pageTop})
 		first = breakAt
-		pageTop = items[first].y
+		pageTop = at(first).y
 		i = breakAt
+		if i < n {
+			it = at(i)
+		}
 	}
-	pages = append(pages, pageInfo{first: first, last: len(items), top: pageTop})
+	pages = append(pages, pageInfo{first: first, last: n, top: pageTop})
 	return pages
 }
 
@@ -1288,7 +1530,7 @@ func (l *Layout) LocationOfPage(page int) (Location, bool) {
 	}
 	info := &l.pages[page]
 	cf := &l.chapters[info.chapter]
-	if info.first < 0 || info.first >= info.last || info.first >= len(cf.items) {
+	if info.first < 0 || info.first >= info.last || info.first >= cf.count() {
 		return Location{}, false
 	}
 	return l.locationAtItem(cf, info.chapter, info.first)
@@ -1372,8 +1614,8 @@ func (l *Layout) resolveLocation(loc Location) (Location, bool) {
 		// position inside it.
 		return loc, true
 	}
-	if loc.Chapter >= 0 && loc.Chapter < len(l.chapters) {
-		if _, known := l.chapters[loc.Chapter].nodeFirst[loc.Node]; known && loc.Node != InvalidNode {
+	if loc.Chapter >= 0 && loc.Chapter < len(l.chapters) && loc.Node != InvalidNode {
+		if nf := l.chapters[loc.Chapter].nodeFirst; int(loc.Node) < len(nf) && nf[loc.Node] >= 0 {
 			return loc, true
 		}
 	}
@@ -1381,7 +1623,7 @@ func (l *Layout) resolveLocation(loc Location) (Location, bool) {
 }
 
 func (cf *chapterFlow) itemOf(loc Location) (int, bool) {
-	if pi, ok := cf.nodePlace[loc.Node]; ok && int(pi) < len(cf.placements) {
+	if pi, ok := cf.nodePlaceAt(loc.Node); ok && int(pi) < len(cf.placements) {
 		pl := &cf.placements[pi]
 		target := 0
 		for si := range pl.para.segs {
@@ -1399,17 +1641,53 @@ func (cf *chapterFlow) itemOf(loc Location) (int, bool) {
 			return pl.firstItem, true
 		}
 		k := sort.Search(n, func(i int) bool {
-			return int(cf.items[pl.firstItem+i].end) > target
+			return int(cf.itemEnd(pl.firstItem+i)) > target
 		})
 		if k >= n {
 			k = n - 1
 		}
 		return pl.firstItem + k, true
 	}
-	if idx, ok := cf.nodeFirst[loc.Node]; ok {
+	if idx, ok := cf.nodeFirstAt(loc.Node); ok {
 		return int(idx), true
 	}
 	return 0, false
+}
+
+// nodePlaceAt returns the paragraph placement index of a node, if it has one.
+func (cf *chapterFlow) nodePlaceAt(node NodeID) (int32, bool) {
+	if node < 0 || int(node) >= len(cf.nodePlace) {
+		return 0, false
+	}
+	pi := cf.nodePlace[node]
+	return pi, pi >= 0
+}
+
+// nodeFirstAt returns the first item index of a node, if it has one.
+func (cf *chapterFlow) nodeFirstAt(node NodeID) (int32, bool) {
+	if node < 0 || int(node) >= len(cf.nodeFirst) {
+		return 0, false
+	}
+	idx := cf.nodeFirst[node]
+	return idx, idx >= 0
+}
+
+// nodeAnchorOf returns the anchor assigned to a node, or NoAnchor.
+func (cf *chapterFlow) nodeAnchorOf(node NodeID) AnchorID {
+	if node < 0 || int(node) >= len(cf.nodeAnchor) {
+		return NoAnchor
+	}
+	return cf.nodeAnchor[node]
+}
+
+// itemEnd returns the paragraph rune offset where an item ends. Images have no
+// runes; they report 0.
+func (cf *chapterFlow) itemEnd(i int) int32 {
+	u, li := cf.locate(i)
+	if cf.units[u].unit.kind != breakLines {
+		return 0
+	}
+	return cf.units[u].unit.lines[li].end
 }
 
 // Relayout computes a new layout with different options. The receiver is not
@@ -1502,20 +1780,22 @@ func (l *Layout) Selection(from, to Location) []SelectionQuad {
 	var out []SelectionQuad
 	for ci := from.Chapter; ci <= to.Chapter; ci++ {
 		cf := &l.chapters[ci]
-		if len(cf.items) == 0 {
+		n := cf.count()
+		if n == 0 {
 			continue
 		}
-		first, last := 0, len(cf.items)-1
+		first, last := 0, n-1
 		if ci == from.Chapter {
 			first = a
 		}
 		if ci == to.Chapter {
 			last = b
 		}
-		first = clampInt(first, 0, len(cf.items)-1)
-		last = clampInt(last, first, len(cf.items)-1)
+		first = clampInt(first, 0, n-1)
+		last = clampInt(last, first, n-1)
 		for i := first; i <= last; i++ {
-			it := &cf.items[i]
+			itv := cf.item(i)
+			it := &itv
 			page := cf.pageOfItem(i)
 			if page < 0 || page >= len(cf.pages) {
 				continue
@@ -1562,7 +1842,8 @@ func (l *Layout) Selection(from, to Location) []SelectionQuad {
 
 // runeForLocation maps loc to an absolute paragraph rune index for item i.
 func runeForLocation(cf *chapterFlow, item int, loc Location) int {
-	it := &cf.items[item]
+	itv := cf.item(item)
+	it := &itv
 	if it.para == nil {
 		return int(it.start)
 	}

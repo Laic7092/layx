@@ -62,7 +62,7 @@ func (l *Layout) lineDecorations(w *textWorker, it *flowItem, chapter int, runs 
 	if !it.lineHasDecoration() {
 		return nil
 	}
-	shaped := l.shapeLine(w, it, chapter)
+	shaped, _ := l.shapeLine(w, it, chapter)
 	if len(shaped) > len(runs) {
 		return nil
 	}

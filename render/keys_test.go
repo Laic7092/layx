@@ -85,12 +85,13 @@ func compareLineBoxes(t *testing.T, what string, got, want *Layout) {
 	for ci := range want.chapters {
 		g := &got.chapters[ci]
 		w := &want.chapters[ci]
-		if len(g.items) != len(w.items) {
-			t.Fatalf("%s: chapter %d item count = %d, want %d", what, ci, len(g.items), len(w.items))
+		if g.count() != w.count() {
+			t.Fatalf("%s: chapter %d item count = %d, want %d", what, ci, g.count(), w.count())
 		}
-		for i := range w.items {
-			a := &g.items[i]
-			b := &w.items[i]
+		want, got := itemsOf(g), itemsOf(w)
+		for i := range got {
+			a := &want[i]
+			b := &got[i]
 			if a.kind != b.kind || a.start != b.start || a.end != b.end {
 				t.Fatalf("%s: chapter %d item %d range = kind %d [%d,%d), want kind %d [%d,%d)",
 					what, ci, i, a.kind, a.start, a.end, b.kind, b.start, b.end)
@@ -101,8 +102,8 @@ func compareLineBoxes(t *testing.T, what string, got, want *Layout) {
 				t.Fatalf("%s: chapter %d item %d horizontal box differs: %+v vs %+v", what, ci, i, a, b)
 			}
 			if a.para != nil && b.para != nil {
-				ga := string(a.para.text[a.start:a.end])
-				wb := string(b.para.text[b.start:b.end])
+				ga := string(paraRunes(a.para)[a.start:a.end])
+				wb := string(paraRunes(b.para)[b.start:b.end])
 				if ga != wb {
 					t.Fatalf("%s: chapter %d item %d text = %q, want %q", what, ci, i, ga, wb)
 				}
@@ -144,8 +145,8 @@ func TestRelayoutLineHeightMatchesFullLayout(t *testing.T) {
 
 	// The new line height must actually have taken effect relative to the
 	// original layout.
-	if cached.chapters[0].items[0].height == orig.chapters[0].items[0].height {
-		t.Fatalf("line height change did not alter line boxes: %v", cached.chapters[0].items[0].height)
+	if itemsOf(&cached.chapters[0])[0].height == itemsOf(&orig.chapters[0])[0].height {
+		t.Fatalf("line height change did not alter line boxes: %v", itemsOf(&cached.chapters[0])[0].height)
 	}
 }
 

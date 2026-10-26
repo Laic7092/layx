@@ -86,15 +86,15 @@ func TestCJKLineBreakingAndFallback(t *testing.T) {
 		t.Fatal(err)
 	}
 	cf := &l.chapters[0]
-	if len(cf.items) < 10 {
-		t.Fatalf("expected many CJK lines, got %d", len(cf.items))
+	if cf.count() < 10 {
+		t.Fatalf("expected many CJK lines, got %d", cf.count())
 	}
 	forbidden := "，。、；：！？）」』】》"
-	for _, it := range cf.items {
+	for _, it := range itemsOf(cf) {
 		if it.kind != itemLine {
 			continue
 		}
-		txt := string(it.para.text[it.start:it.end])
+		txt := string(paraRunes(it.para)[it.start:it.end])
 		if txt == "" {
 			continue
 		}
@@ -155,8 +155,9 @@ func TestCJKGolden(t *testing.T) {
 		t.Fatal(err)
 	}
 	cf := &l.chapters[0]
+	items := itemsOf(cf)
 	lines := 0
-	for _, it := range cf.items {
+	for _, it := range items {
 		if it.kind == itemLine {
 			lines++
 		}
@@ -166,7 +167,7 @@ func TestCJKGolden(t *testing.T) {
 	}
 	// Lines must be split at CJK boundaries; each line should be non-empty and
 	// no wider than the content box.
-	for _, it := range cf.items {
+	for _, it := range itemsOf(cf) {
 		if it.kind != itemLine {
 			continue
 		}

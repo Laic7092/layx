@@ -131,7 +131,7 @@ type inlineToken struct {
 	kind  tokenKind
 	node  NodeID
 	style Style
-	text  []rune
+	text  string
 	image ImageID
 	w, h  float32
 	link  string
@@ -164,7 +164,7 @@ func (lc *layoutContext) flattenInline(nodes []Node, ids []NodeID, parent Style,
 			if n.Text != "" {
 				*out = append(*out, inlineToken{
 					kind: tokenText, node: id, style: st,
-					text: []rune(n.Text), link: n.Link, lang: lang,
+					text: n.Text, link: n.Link, lang: lang,
 				})
 			}
 		case NodeBreak:

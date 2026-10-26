@@ -248,9 +248,9 @@ func cjkEm(t *testing.T, size float32) float32 {
 	t.Helper()
 	l := cjkParagraph(t, "天地", AlignLeft, 2000, size)
 	cf := &l.chapters[0]
-	for i := range cf.items {
-		if cf.items[i].kind == itemLine {
-			return cf.items[i].width / 2
+	for i := 0; i < cf.count(); i++ {
+		if it := cf.item(i); it.kind == itemLine {
+			return it.width / 2
 		}
 	}
 	t.Fatal("no line in reference layout")
@@ -268,10 +268,11 @@ func TestPunctuationCompression(t *testing.T) {
 
 	lines := func(l *Layout) []string {
 		var out []string
-		for i := range l.chapters[0].items {
-			it := &l.chapters[0].items[i]
+		items := itemsOf(&l.chapters[0])
+		for i := range items {
+			it := &items[i]
 			if it.kind == itemLine {
-				out = append(out, string(it.para.text[it.start:it.end]))
+				out = append(out, string(paraRunes(it.para)[it.start:it.end]))
 			}
 		}
 		return out
@@ -330,27 +331,29 @@ func TestHangingPunctuation(t *testing.T) {
 	hang := cjkParagraphRules(t, text, AlignLeft, width, size, TextRules{HangingPunctuation: true})
 
 	var plainLines, hangLines []*flowItem
-	for i := range plain.chapters[0].items {
-		if it := &plain.chapters[0].items[i]; it.kind == itemLine {
+	for i := 0; i < plain.chapters[0].count(); i++ {
+		if itv := plain.chapters[0].item(i); itv.kind == itemLine {
+			it := &itv
 			plainLines = append(plainLines, it)
 		}
 	}
-	for i := range hang.chapters[0].items {
-		if it := &hang.chapters[0].items[i]; it.kind == itemLine {
+	for i := 0; i < hang.chapters[0].count(); i++ {
+		if itv := hang.chapters[0].item(i); itv.kind == itemLine {
+			it := &itv
 			hangLines = append(hangLines, it)
 		}
 	}
 	if len(plainLines) != 2 {
 		t.Fatalf("without hanging, expected the mark to wrap; got %d lines", len(plainLines))
 	}
-	if got := string(plainLines[1].para.text[plainLines[1].start:plainLines[1].end]); got != "宇。" {
+	if got := lineText(plainLines[1]); got != "宇。" {
 		t.Fatalf("without hanging, second line = %q, want %q", got, "宇。")
 	}
 	if len(hangLines) != 1 {
 		t.Fatalf("with hanging, expected one line; got %d", len(hangLines))
 	}
 	ln := hangLines[0]
-	if got := string(ln.para.text[ln.start:ln.end]); got != text {
+	if got := string(paraRunes(ln.para)[ln.start:ln.end]); got != text {
 		t.Fatalf("hanging line text = %q, want %q", got, text)
 	}
 	over := ln.width - ln.avail

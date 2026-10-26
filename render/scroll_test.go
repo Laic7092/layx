@@ -71,7 +71,8 @@ func closef(a, b, eps float32) bool { return float32(math.Abs(float64(a-b))) <= 
 
 // locForLineStart returns a Location pointing at the first rune of item idx.
 func locForLineStart(cf *chapterFlow, ci, idx int) (Location, bool) {
-	it := &cf.items[idx]
+	itv := cf.item(idx)
+	it := &itv
 	if it.kind != itemLine || it.para == nil {
 		return Location{}, false
 	}
@@ -200,7 +201,7 @@ func TestScrollChapterContinuity(t *testing.T) {
 
 	// Page top margins are viewport insets, not content: the body starts at
 	// content y=0 and each chapter keeps only its own block margins.
-	first := l.chapters[0].items[0]
+	first := itemsOf(&l.chapters[0])[0]
 	y0, ok := l.OffsetOf(Location{Chapter: 0, Node: first.para.segs[0].node})
 	if !ok {
 		t.Fatal("OffsetOf first line failed")
@@ -211,7 +212,7 @@ func TestScrollChapterContinuity(t *testing.T) {
 
 	for ci := range l.chapters {
 		cf := &l.chapters[ci]
-		if len(cf.items) == 0 {
+		if cf.count() == 0 {
 			continue
 		}
 		loc, ok := locForLineStart(cf, ci, 0)
@@ -222,7 +223,7 @@ func TestScrollChapterContinuity(t *testing.T) {
 		if !ok {
 			t.Fatalf("chapter %d: OffsetOf failed", ci)
 		}
-		want := l.chapterTop[ci] + cf.items[0].y
+		want := l.chapterTop[ci] + itemsOf(cf)[0].y
 		if !closef(got, want, 0.01) {
 			t.Fatalf("chapter %d first line y = %v, want %v", ci, got, want)
 		}
@@ -393,8 +394,9 @@ func TestPositionRoundTripBothModes(t *testing.T) {
 			}
 			for ci := range l.chapters {
 				cf := &l.chapters[ci]
-				for idx := 0; idx < len(cf.items); idx++ {
-					if cf.items[idx].kind != itemLine {
+				items := itemsOf(cf)
+				for idx := 0; idx < len(items); idx++ {
+					if items[idx].kind != itemLine {
 						continue
 					}
 					loc, ok := locForLineStart(cf, ci, idx)
@@ -436,8 +438,9 @@ func TestScrollPositionStableAfterRelayout(t *testing.T) {
 	var samples []sample
 	for ci := range l.chapters {
 		cf := &l.chapters[ci]
-		for idx := 0; idx < len(cf.items); idx += 2 {
-			it := &cf.items[idx]
+		for idx := 0; idx < cf.count(); idx += 2 {
+			itv := cf.item(idx)
+			it := &itv
 			if it.kind != itemLine {
 				continue
 			}
@@ -447,7 +450,7 @@ func TestScrollPositionStableAfterRelayout(t *testing.T) {
 			}
 			samples = append(samples, sample{
 				ci: ci, idx: idx, loc: loc,
-				text: string(it.para.text[it.start:it.end]),
+				text: string(paraRunes(it.para)[it.start:it.end]),
 			})
 		}
 	}
@@ -474,11 +477,12 @@ func TestScrollPositionStableAfterRelayout(t *testing.T) {
 		if !ok {
 			t.Fatalf("sample chapter %d item %d: itemOf after relayout failed", s.ci, s.idx)
 		}
-		it := &cf.items[idx]
+		itv := cf.item(idx)
+		it := &itv
 		if it.kind != itemLine {
 			t.Fatalf("sample chapter %d: relayout landed on non-line item", s.ci)
 		}
-		if got := string(it.para.text[it.start:it.end]); got != s.text {
+		if got := string(paraRunes(it.para)[it.start:it.end]); got != s.text {
 			t.Fatalf("sample chapter %d: relayout landed on line %q, want %q", s.ci, got, s.text)
 		}
 		want := l2.chapterTop[s.ci] + it.y
@@ -496,8 +500,8 @@ func TestScrollHitTest(t *testing.T) {
 	// Pick a line in the second chapter and hit the middle of its first glyph.
 	cf := &l.chapters[1]
 	var idx = -1
-	for i := range cf.items {
-		if cf.items[i].kind == itemLine {
+	for i := 0; i < cf.count(); i++ {
+		if cf.item(i).kind == itemLine {
 			idx = i
 			break
 		}
@@ -505,7 +509,8 @@ func TestScrollHitTest(t *testing.T) {
 	if idx < 0 {
 		t.Fatal("no line in second chapter")
 	}
-	it := &cf.items[idx]
+	itv := cf.item(idx)
+	it := &itv
 	y := l.chapterTop[1] + it.y + it.height/2
 	x := it.x + 1
 	loc, ok := l.HitTest(x, y)
@@ -737,11 +742,12 @@ func TestScrollSharesPagedFlow(t *testing.T) {
 	for ci := range paged.chapters {
 		a := &paged.chapters[ci]
 		b := &scroll.chapters[ci]
-		if len(a.items) != len(b.items) {
-			t.Fatalf("chapter %d item count = %d, want %d", ci, len(b.items), len(a.items))
+		if a.count() != b.count() {
+			t.Fatalf("chapter %d item count = %d, want %d", ci, b.count(), a.count())
 		}
-		for i := range a.items {
-			x, y := a.items[i], b.items[i]
+		ai, bi := itemsOf(a), itemsOf(b)
+		for i := range ai {
+			x, y := ai[i], bi[i]
 			if x.kind != y.kind || x.start != y.start || x.end != y.end ||
 				x.x != y.x || x.y != y.y || x.width != y.width || x.height != y.height {
 				t.Fatalf("chapter %d item %d differs between modes", ci, i)

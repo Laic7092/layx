@@ -36,10 +36,11 @@ func hyphenOptions(t testing.TB, hyphenator Hyphenator, width float32) LayoutOpt
 
 func itemTexts(l *Layout) []string {
 	var out []string
-	for i := range l.chapters[0].items {
-		it := &l.chapters[0].items[i]
+	items := itemsOf(&l.chapters[0])
+	for i := range items {
+		it := &items[i]
 		if it.kind == itemLine {
-			out = append(out, string(it.para.text[it.start:it.end]))
+			out = append(out, string(paraRunes(it.para)[it.start:it.end]))
 		}
 	}
 	return out
@@ -55,7 +56,7 @@ func TestHyphenationSplitsWord(t *testing.T) {
 		t.Fatalf("hyphenated lines = %q, want [hy phen]", lines)
 	}
 	cf := &on.chapters[0]
-	first := cf.items[0]
+	first := itemsOf(cf)[0]
 	if first.end != 2 {
 		t.Fatalf("first line ends at rune %d, want 2", first.end)
 	}
@@ -161,7 +162,7 @@ func TestHyphenationUnusedPointsDoNotWidenLine(t *testing.T) {
 	if got := itemTexts(l); len(got) != 1 || got[0] != "hyphenation" {
 		t.Fatalf("lines = %q, want the whole word", got)
 	}
-	it := &l.chapters[0].items[0]
+	it := &itemsOf(&l.chapters[0])[0]
 	p := &capturePainter{}
 	l.Page(0).Draw(p)
 	var drawn float32
@@ -193,8 +194,9 @@ func TestHyphenationNarrowWidthsKeepRuneRanges(t *testing.T) {
 			got   []rune
 			lines int
 		)
-		for i := range cf.items {
-			it := &cf.items[i]
+		items := itemsOf(cf)
+		for i := range items {
+			it := &items[i]
 			if it.kind != itemLine {
 				continue
 			}
@@ -205,9 +207,9 @@ func TestHyphenationNarrowWidthsKeepRuneRanges(t *testing.T) {
 			if it.end < it.start {
 				t.Fatalf("width %v: line %d has negative range", width, lines)
 			}
-			got = append(got, it.para.text[it.start:it.end]...)
+			got = append(got, paraRunes(it.para)[it.start:it.end]...)
 			next = it.end
-			if it.para.hyphenAt(it.end) && !strings.Contains("hyphenation typography representation", string(it.para.text[it.end:it.end+1])) {
+			if it.para.hyphenAt(it.end) && !strings.Contains("hyphenation typography representation", string(paraRunes(it.para)[it.end:it.end+1])) {
 				t.Fatalf("width %v: hyphen at end %d is not inside a word", width, it.end)
 			}
 		}

@@ -17,7 +17,11 @@ type FontFace struct {
 	// Weight is a CSS-style numeric weight (100..900). Zero means 400.
 	Weight int
 	Slant  Slant
-	// Data is the complete font file. NewFontSet copies it.
+	// Data is the complete font file. NewFontSet keeps the slice instead of
+	// copying it: a 16 MB CJK collection would otherwise be duplicated for the
+	// lifetime of the set, and the library only ever reads it. The caller must
+	// not modify or reuse the buffer while the FontSet is alive (the same
+	// contract paint.Font.Data documents).
 	Data []byte
 	// Index selects a face inside a TrueType/OpenType collection.
 	Index int
@@ -61,7 +65,7 @@ func NewFontSet(faces ...FontFace) (*FontSet, error) {
 			face.Family = "default"
 		}
 
-		data := append([]byte(nil), face.Data...)
+		data := face.Data
 		loaders, err := ot.NewLoaders(bytes.NewReader(data))
 		if err != nil {
 			return nil, fmt.Errorf("%w: face %d %q: %v", ErrInvalidOptions, i, face.Family, err)

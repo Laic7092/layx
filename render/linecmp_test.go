@@ -107,13 +107,14 @@ func TestLineBoxes(t *testing.T) {
 	var sb strings.Builder
 	n := 0
 	for ci := range lay.chapters {
-		for i := range lay.chapters[ci].items {
-			it := &lay.chapters[ci].items[i]
+		items := itemsOf(&lay.chapters[ci])
+		for i := range items {
+			it := &items[i]
 			if it.kind != itemLine {
 				continue
 			}
 			n++
-			text := string(it.para.text[it.start:it.end])
+			text := string(paraRunes(it.para)[it.start:it.end])
 			fmt.Fprintf(&sb, "%d\t%d\t%.2f\t%.2f\t%.2f\t%.2f\t%s\n",
 				n, it.paraLine, it.width, it.avail, it.y, it.height, text)
 		}

@@ -22,26 +22,10 @@ type breakChapter struct {
 // chapterPlacements is the BreakKey-scoped half of a chapterFlow.
 type chapterPlacements struct {
 	placements []paraPlacement
-	nodePlace  map[NodeID]int32
-	nodeFirst  map[NodeID]int32
-	nodeAnchor map[NodeID]AnchorID
+	nodePlace  []int32
+	nodeFirst  []int32
+	nodeAnchor []AnchorID
 	anchors    map[AnchorID]anchorPos
-}
-
-// laidChapter is a chapter with vertical positions and a page map. It is
-// produced from a breakChapter and reused while PageKey is unchanged.
-type laidChapter struct {
-	items  []flowItem
-	paras  []*paragraph
-	boxes  []blockRect
-	height float32
-
-	placements []paraPlacement
-	nodePlace  map[NodeID]int32
-	nodeFirst  map[NodeID]int32
-	nodeAnchor map[NodeID]AnchorID
-	anchors    map[AnchorID]anchorPos
-	pages      []pageInfo
 }
 
 // cacheKey identifies one chapter variant. The cache itself is scoped to one
@@ -68,6 +52,10 @@ type lineKey struct {
 type lineEntry struct {
 	key  lineKey
 	runs []shapedRun
+	// weights are the justification weights of the line's glyphs, computed when
+	// the line is shaped. They depend only on the text and the punctuation
+	// rules, so drawing never has to materialize the paragraph's runes again.
+	weights []float32
 }
 
 // lineCache is a bounded LRU of shaped, not-yet-justified lines. Justification
@@ -91,7 +79,7 @@ func newLineCache(limit int) *lineCache {
 	}
 }
 
-func (c *lineCache) get(key lineKey) ([]shapedRun, bool) {
+func (c *lineCache) get(key lineKey) (*lineEntry, bool) {
 	if c == nil || c.limit <= 0 {
 		return nil, false
 	}
@@ -102,18 +90,19 @@ func (c *lineCache) get(key lineKey) ([]shapedRun, bool) {
 		return nil, false
 	}
 	c.order.MoveToFront(e)
-	return e.Value.(*lineEntry).runs, true
+	return e.Value.(*lineEntry), true
 }
 
-func (c *lineCache) put(key lineKey, runs []shapedRun) {
+func (c *lineCache) put(e *lineEntry) {
 	if c == nil || c.limit <= 0 {
 		return
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if e, ok := c.entries[key]; ok {
-		e.Value.(*lineEntry).runs = runs
-		c.order.MoveToFront(e)
+	if existing, ok := c.entries[e.key]; ok {
+		existing.Value.(*lineEntry).runs = e.runs
+		existing.Value.(*lineEntry).weights = e.weights
+		c.order.MoveToFront(existing)
 		return
 	}
 	for c.order.Len() >= c.limit {
@@ -124,8 +113,7 @@ func (c *lineCache) put(key lineKey, runs []shapedRun) {
 		delete(c.entries, back.Value.(*lineEntry).key)
 		c.order.Remove(back)
 	}
-	e := c.order.PushFront(&lineEntry{key: key, runs: runs})
-	c.entries[key] = e
+	c.entries[e.key] = c.order.PushFront(e)
 }
 
 // variantCache keeps the most recent whole-document variants. Capacity is
@@ -144,7 +132,7 @@ type variantCache struct {
 	breakOrder []cacheKey
 
 	pageLimit int
-	pageMap   map[cacheKey]*laidChapter
+	pageMap   map[cacheKey]*chapterFlow
 	pageOrder []cacheKey
 
 	// A Document is immutable and an Engine's Limits are fixed, so the
@@ -168,7 +156,7 @@ func newVariantCache(chapters int) *variantCache {
 		breakLimit: limit,
 		breakMap:   make(map[cacheKey]*breakChapter, limit),
 		pageLimit:  limit,
-		pageMap:    make(map[cacheKey]*laidChapter, limit),
+		pageMap:    make(map[cacheKey]*chapterFlow, limit),
 	}
 }
 
@@ -215,7 +203,7 @@ func (c *variantCache) putBreak(key cacheKey, v *breakChapter) {
 	c.breakOrder = append(c.breakOrder, key)
 }
 
-func (c *variantCache) getPage(key cacheKey) *laidChapter {
+func (c *variantCache) getPage(key cacheKey) *chapterFlow {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	v, ok := c.pageMap[key]
@@ -226,7 +214,7 @@ func (c *variantCache) getPage(key cacheKey) *laidChapter {
 	return v
 }
 
-func (c *variantCache) putPage(key cacheKey, v *laidChapter) {
+func (c *variantCache) putPage(key cacheKey, v *chapterFlow) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if _, exists := c.pageMap[key]; exists {

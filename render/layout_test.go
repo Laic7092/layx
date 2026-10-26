@@ -151,8 +151,9 @@ func TestLayoutBasic(t *testing.T) {
 	for ci := range l.chapters {
 		cf := &l.chapters[ci]
 		lastY := float32(-1)
-		for i := range cf.items {
-			it := &cf.items[i]
+		items := itemsOf(cf)
+		for i := range items {
+			it := &items[i]
 			if it.kind != itemLine {
 				continue
 			}
@@ -271,7 +272,7 @@ func TestPaginationBreakBefore(t *testing.T) {
 		t.Fatalf("break-before should force 2 pages, got %d", l.PageCount())
 	}
 	cf := &l.chapters[0]
-	if cf.items[cf.pages[0].last].breakBefore != true {
+	if itemsOf(cf)[cf.pages[0].last].breakBefore != true {
 		t.Fatal("second page does not start at the break-before item")
 	}
 }
@@ -298,9 +299,10 @@ func TestImageLayoutAndLinks(t *testing.T) {
 	l := testLayout(t, doc, 2)
 	cf := &l.chapters[0]
 	var img *flowItem
-	for i := range cf.items {
-		if cf.items[i].kind == itemImage {
-			img = &cf.items[i]
+	items := itemsOf(cf)
+	for i := range items {
+		if items[i].kind == itemImage {
+			img = &items[i]
 			break
 		}
 	}
@@ -347,11 +349,12 @@ func TestDeterministicAcrossWorkers(t *testing.T) {
 		}
 	}
 	for i := range a.chapters {
-		if len(a.chapters[i].items) != len(b.chapters[i].items) {
+		if a.chapters[i].count() != b.chapters[i].count() {
 			t.Fatalf("chapter %d item count differs", i)
 		}
-		for j := range a.chapters[i].items {
-			x, y := a.chapters[i].items[j], b.chapters[i].items[j]
+		ai, bi := itemsOf(&a.chapters[i]), itemsOf(&b.chapters[i])
+		for j := range ai {
+			x, y := ai[j], bi[j]
 			if x.kind != y.kind || x.start != y.start || x.end != y.end ||
 				x.x != y.x || x.y != y.y || x.width != y.width || x.height != y.height {
 				t.Fatalf("chapter %d item %d differs", i, j)
@@ -476,7 +479,7 @@ func TestGoldenLayout(t *testing.T) {
 		t.Fatalf("pages = %d, want 5", l.PageCount())
 	}
 	lines := 0
-	for _, it := range l.chapters[0].items {
+	for _, it := range itemsOf(&l.chapters[0]) {
 		if it.kind == itemLine {
 			lines++
 		}
@@ -491,12 +494,13 @@ func TestGoldenLayout(t *testing.T) {
 			t.Fatalf("page %d range = [%d,%d), want [%d,%d)", i, got.first, got.last, want[0], want[1])
 		}
 	}
-	first := l.chapters[0].items[0]
-	last := l.chapters[0].items[len(l.chapters[0].items)-1]
-	if got := string(first.para.text[first.start:first.end]); got != "Chapter One" {
+	flowItems := itemsOf(&l.chapters[0])
+	first := flowItems[0]
+	last := flowItems[len(flowItems)-1]
+	if got := string(paraRunes(first.para)[first.start:first.end]); got != "Chapter One" {
 		t.Fatalf("first line = %q", got)
 	}
-	if got := string(last.para.text[last.start:last.end]); got != "and line wrapping. " {
+	if got := string(paraRunes(last.para)[last.start:last.end]); got != "and line wrapping. " {
 		t.Fatalf("last line = %q", got)
 	}
 }
@@ -572,8 +576,9 @@ func TestPageGlyphBaselines(t *testing.T) {
 		cf := &l.chapters[info.chapter]
 
 		var want []float32
-		for i := info.first; i < info.last && i < len(cf.items); i++ {
-			it := &cf.items[i]
+		for i := info.first; i < info.last && i < cf.count(); i++ {
+			itv := cf.item(i)
+			it := &itv
 			if it.kind != itemLine {
 				continue
 			}
@@ -618,7 +623,7 @@ func TestPaginateWidowsOrphans(t *testing.T) {
 			kind: itemImage, x: 0, y: float32(i * 10), width: 10, height: 10,
 		})
 	}
-	p := &paragraph{text: []rune("0123456789abcdefghij")}
+	p := &paragraph{runeLen: 20}
 	for li := 0; li < 6; li++ {
 		items = append(items, flowItem{
 			kind: itemLine, para: p, start: int32(li), end: int32(li + 1),
@@ -630,7 +635,9 @@ func TestPaginateWidowsOrphans(t *testing.T) {
 	// The zero value is the CSS initial value: two orphan lines are required,
 	// so the paragraph starts on the next page instead of one line stranded at
 	// the bottom.
-	pages := paginate(context.Background(), items, pageHeight, Typography{})
+	pages := paginateN(context.Background(), len(items), func(i int) pageItem {
+		return pageItemOf(&items[i])
+	}, pageHeight, Typography{})
 	if len(pages) < 2 {
 		t.Fatalf("expected at least two pages, got %d", len(pages))
 	}
@@ -641,7 +648,9 @@ func TestPaginateWidowsOrphans(t *testing.T) {
 	// One is the smallest value CSS allows and it fills the page: this is how
 	// a host asks for no protection, since zero is not legal CSS.
 	typo := Typography{Rules: TextRules{Widows: 1, Orphans: 1}}
-	pages = paginate(context.Background(), items, pageHeight, typo)
+	pages = paginateN(context.Background(), len(items), func(i int) pageItem {
+		return pageItemOf(&items[i])
+	}, pageHeight, typo)
 	if len(pages) < 2 {
 		t.Fatalf("expected at least two pages, got %d", len(pages))
 	}

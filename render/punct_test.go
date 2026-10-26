@@ -85,8 +85,9 @@ func TestHangingPunctuationLinesStayTogether(t *testing.T) {
 		l := cjkParagraphRules(t, text, AlignLeft, width, 18, TextRules{HangingPunctuation: true})
 		next := 0
 		lines := 0
-		for i := range l.chapters[0].items {
-			it := &l.chapters[0].items[i]
+		items := itemsOf(&l.chapters[0])
+		for i := range items {
+			it := &items[i]
 			if it.kind != itemLine {
 				continue
 			}

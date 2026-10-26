@@ -24,10 +24,13 @@
 
 1. **分页与滚动共享同一份断行与块布局**，只有"取窗口"不同。位置、锚点、字号
    变化不会因为模式切换而分裂。
-2. **布局预计算，绘制惰性**。`Layout` 建好时只存行盒、块盒、页映射和锚点；
-   DisplayList 在首次访问 `Page`/`Tile` 时生成并缓存。
-3. **不存全书 shaped glyph**。行盒只记 rune 区间和度量，绘制时按行重新 shaping
-   （经有界行缓存）。500 万字全书 shaped glyph 约 450 MB，不可接受。
+2. **布局预计算，绘制惰性**。`Layout` 建好时只存行盒、块盒、页映射、锚点，以及每个
+   item 的 y 与所属 unit；`flowItem` 是按需物化的视图，不是存储。DisplayList 在首次
+   访问 `Page`/`Tile` 时生成并缓存。
+3. **不存全书 shaped glyph，也不存原文副本**。行盒只记 rune 区间和度量，绘制时按行
+   重新 shaping（经有界行缓存）。500 万字全书 shaped glyph 约 450 MB，不可接受。
+   同理：段落不保留 `[]rune` 拷贝（`paraSeg` 只记源字符串，worker 缓冲按需物化），
+   flow 不为每行物化 `flowItem`（只存 y 与 unit 下标，其余由 cache 的断行结果推导）。
 4. **两遍式**：断行 → 分页。改行高、段间距、页高不需要重新 shaping 或断行。
 5. **缓存 key 是输入哈希，不是失效传播**。任何改变断行/分页结果的输入必须进
    `BreakKey`/`PageKey`；新增政策字段靠整体哈希结构体自动进 key。
@@ -35,6 +38,18 @@
    需要异步或后台重排，由调用方显式控制。
 7. **确定性**：不同 `Workers` 数量产出逐字相同的布局；测试直接比对两条路径。
 8. **文档、字体集合、`Layout` 构建后不可变**，可并发读；唯一可变的是内部缓存。
+
+## 为什么分段不走 bidi
+
+`shaping.Segmenter.Split` 对每段都跑 UAX #9，即使这个引擎只产出 LTR。go-text 的短路
+条件很保守：只要有一个 rune 的 bidi 类是 `{L, EN, ES, CS, WS}` 之外的（CJK 标点是 ON），
+整段就跑完整算法——实测 160 字中文段落 6.3 KB 分配，把标点换成汉字后是 0。
+
+所以 `render/segment.go` 自己做 script + face 切分：规则照抄 go-text v0.3.5
+（`splitByScript`、`splitByFace`、`enforceLanguages` 与成对标点表，附出处），只在
+"全部是简单脚本（Latin/CJK/Hangul/Greek/Cyrillic + Common）且无双向控制符"时走快路径，
+其余一律回落到 `Segmenter.Split`——复杂脚本（Arabic/Indic/Thai…）与 RTL 的正确性不受
+影响，代价是那条路径仍然分配。切分结果由 `scripts/linecmp.sh` 的四组语料逐行比对钉死。
 
 ## 为什么按章/段落并行
 

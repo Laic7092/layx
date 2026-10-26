@@ -119,8 +119,8 @@ func TestWordSpacingAdvanceAndLineCount(t *testing.T) {
 
 	countLines := func(l *Layout) int {
 		n := 0
-		for i := range l.chapters[0].items {
-			if l.chapters[0].items[i].kind == itemLine {
+		for i := 0; i < l.chapters[0].count(); i++ {
+			if itemsOf(&l.chapters[0])[i].kind == itemLine {
 				n++
 			}
 		}
@@ -180,7 +180,7 @@ func borderDoc(t testing.TB, radius float32) *Document {
 
 func TestBorderShrinksContentBox(t *testing.T) {
 	l := featureLayout(t, borderDoc(t, 0), featureOptions(t, 420, 400))
-	it := &l.chapters[0].items[0]
+	it := &itemsOf(&l.chapters[0])[0]
 	// 420 - 48 margins - 5 left - 3 right
 	if want := float32(364); !near(it.avail, want, 0.01) {
 		t.Fatalf("line available width = %v, want %v", it.avail, want)
@@ -387,7 +387,7 @@ func TestTextDecorationGeometry(t *testing.T) {
 			cf := &l.chapters[info.chapter]
 			lines := 0
 			for i := info.first; i < info.last; i++ {
-				if cf.items[i].kind == itemLine {
+				if cf.item(i).kind == itemLine {
 					lines++
 				}
 			}
@@ -403,7 +403,8 @@ func TestTextDecorationGeometry(t *testing.T) {
 			// line it belongs to, not just the first line on the page.
 			var baselines []float32
 			for i := info.first; i < info.last; i++ {
-				it := &cf.items[i]
+				itv := cf.item(i)
+				it := &itv
 				if it.kind == itemLine {
 					baselines = append(baselines, l.opts.Margins.Top-info.top+it.y+it.baseline)
 				}

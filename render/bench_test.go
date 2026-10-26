@@ -9,7 +9,7 @@ import (
 	"github.com/laix/layx/render/paint"
 )
 
-func cjkBenchDoc(b *testing.B, totalRunes int) (*Document, *FontSet) {
+func cjkBenchDoc(b testing.TB, totalRunes int) (*Document, *FontSet) {
 	b.Helper()
 	return cjkBenchDocAnchors(b, totalRunes, 0)
 }
@@ -17,7 +17,7 @@ func cjkBenchDoc(b *testing.B, totalRunes int) (*Document, *FontSet) {
 // cjkBenchDocAnchors builds the 5M-style corpus with anchors spread over the
 // paragraph blocks. Multiple anchors may point at one block; this measures the
 // anchor maps themselves without changing the text or line count.
-func cjkBenchDocAnchors(b *testing.B, totalRunes, anchors int) (*Document, *FontSet) {
+func cjkBenchDocAnchors(b testing.TB, totalRunes, anchors int) (*Document, *FontSet) {
 	b.Helper()
 	face, ok := cjkFace(b)
 	if !ok {
