@@ -3,6 +3,7 @@ package epub
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"io"
 	"strconv"
 	"strings"
@@ -46,6 +47,21 @@ type Options struct {
 	// percentage margins, padding and text-indent. Zero means "unknown":
 	// percentages then resolve to zero instead of a guess.
 	ContainerWidth float32
+
+	// OnIssue receives one diagnostic for every piece of content the converter
+	// or the CSS cascade could not represent: a linearized <table>, an image
+	// whose bytes are missing, a flattened <ruby> annotation, an ignored
+	// @font-face rule, a stylesheet that could not be read. The alternative is
+	// the silent degradation the library used to have; a host that wants to
+	// explain "this page lost something" should set this.
+	//
+	// OnIssue is called once per issue from Build/BuildWith, after the
+	// conversion has finished and before the call returns, on the calling
+	// goroutine, so the callback never runs concurrently with itself. A book
+	// with nothing to report never calls it. The same list, including issues
+	// found while the container was opened, is available afterwards from
+	// Book.Issues; OnIssue is only the push form of that list.
+	OnIssue func(render.Issue)
 }
 
 func (o Options) linkColor() paint.Color {
@@ -97,6 +113,15 @@ var voidTags = map[string]bool{
 var skippedTags = map[string]bool{
 	"head": true, "title": true, "style": true, "script": true,
 	"meta": true, "link": true, "base": true, "math": true,
+}
+
+// unsupportedContentTags are elements whose media or control content the IR
+// cannot express. They are reported as dropped content; any fallback children
+// (the text inside <video> or <iframe>) are still emitted as plain text.
+var unsupportedContentTags = map[string]bool{
+	"audio": true, "video": true, "canvas": true, "iframe": true,
+	"object": true, "embed": true, "input": true, "select": true,
+	"textarea": true,
 }
 
 var blockTags = map[string]bool{
@@ -168,27 +193,38 @@ type ImageResolver func(href string, widthHint, heightHint float32) (render.Imag
 // element ids (navigation targets and in-book link targets) to render anchors;
 // base is the chapter's archive path, used to resolve relative hrefs. style is
 // the chapter's cascade and styles the document-wide dedupe table, shared by
-// every chapter of one Build. The converter installs each anchor on the first
-// node the element produces, or falls back to the chapter root when the
-// element has no visible content.
-func convertChapter(data []byte, id string, anchor render.AnchorID, resolve ImageResolver, anchors map[string]render.AnchorID, base string, style *cascade, styles *styleRegistry) (render.Chapter, error) {
+// every chapter of one Build. issues, when not nil, receives the content the
+// converter had to drop or flatten; the resulting Issue.Chapter is id and the
+// detail starts with base. The converter installs each anchor on the first node
+// the element produces, or falls back to the chapter root when the element has
+// no visible content.
+func convertChapter(data []byte, id string, anchor render.AnchorID, resolve ImageResolver, anchors map[string]render.AnchorID, base string, style *cascade, styles *styleRegistry, issues *issueCollector) (render.Chapter, error) {
 	tree, err := parseTree(data)
 	if err != nil {
 		return render.Chapter{}, err
 	}
-	return convertTree(tree, id, anchor, resolve, anchors, base, style, styles)
+	return convertTree(tree, id, anchor, resolve, anchors, base, style, styles, issues)
 }
 
 // convertTree is convertChapter for callers that already parsed the markup
 // (Build does, to find stylesheet links).
-func convertTree(tree *hnode, id string, anchor render.AnchorID, resolve ImageResolver, anchors map[string]render.AnchorID, base string, style *cascade, styles *styleRegistry) (render.Chapter, error) {
+func convertTree(tree *hnode, id string, anchor render.AnchorID, resolve ImageResolver, anchors map[string]render.AnchorID, base string, style *cascade, styles *styleRegistry, issues *issueCollector) (render.Chapter, error) {
 	if style == nil {
 		style = newCascade(18, Options{}, nil)
 	}
 	if styles == nil {
 		styles = newStyleRegistry()
 	}
-	c := &converter{resolve: resolve, anchors: anchors, base: base, cascade: style, styles: styles}
+	c := &converter{
+		resolve:  resolve,
+		anchors:  anchors,
+		base:     base,
+		chapter:  id,
+		cascade:  style,
+		styles:   styles,
+		issues:   issues,
+		usedAnch: map[render.AnchorID]bool{},
+	}
 	rootComputed := c.cascade.root()
 	root := c.add(render.Node{Kind: render.NodeBlock, Style: c.styleOf(rootComputed), Anchor: anchor})
 
@@ -308,13 +344,32 @@ type converter struct {
 	nodes     []render.Node
 	resolve   ImageResolver
 	anchors   map[string]render.AnchorID
-	base      string          // archive path of this chapter, for hrefs
-	cascade   *cascade        // user-agent + author styles for this chapter
-	styles    *styleRegistry  // document-wide style table
-	path      matchPath       // ancestor chain ending at the element being emitted
-	lists     []listState     // open <ol>/<ul> counters
-	carry     render.AnchorID // anchor waiting for the first node of a wrapper
-	carryLink string          // link waiting for the first node of an <a>
+	base      string                   // archive path of this chapter, for hrefs
+	chapter   string                   // render chapter ID, used in diagnostics
+	cascade   *cascade                 // user-agent + author styles for this chapter
+	styles    *styleRegistry           // document-wide style table
+	issues    *issueCollector          // dropped-content diagnostics, nil-safe
+	path      matchPath                // ancestor chain ending at the element being emitted
+	lists     []listState              // open <ol>/<ul> counters
+	carry     render.AnchorID          // anchor waiting for the first node of a wrapper
+	carryLink string                   // link waiting for the first node of an <a>
+	usedAnch  map[render.AnchorID]bool // anchors already installed on a node
+}
+
+// dropf reports content the converter could not represent. The detail starts
+// with the chapter's archive path so a host can point the reader at the page
+// that lost something; node is the render node the dropped content maps to, or
+// InvalidNode when nothing was produced for it. It is nil-safe and formats
+// nothing when no collector is attached (the unit-test path).
+func (c *converter) dropf(node render.NodeID, format string, args ...any) {
+	if c.issues == nil {
+		return
+	}
+	detail := fmt.Sprintf(format, args...)
+	if c.base != "" {
+		detail = c.base + ": " + detail
+	}
+	c.issues.add(render.IssueDroppedContent, c.chapter, node, "%s", detail)
 }
 
 type listState struct {
@@ -322,24 +377,42 @@ type listState struct {
 }
 
 // anchorFor returns the render anchor installed on the element's id (or, for
-// legacy <a name>, its name), or 0 when it is not a navigation target.
+// legacy <a name>, its name), or 0 when it is not a navigation target. Only the
+// first element with a given id takes the anchor: books do contain duplicate
+// ids, and installing one anchor twice would make the document invalid.
 func (c *converter) anchorFor(n *hnode) render.AnchorID {
 	if len(c.anchors) == 0 || n == nil {
 		return 0
 	}
 	if id := attr(n, "id"); id != "" {
 		if a, ok := c.anchors[id]; ok {
-			return a
+			return c.takeAnchor(a)
 		}
 	}
 	if n.tag == "a" {
 		if name := attr(n, "name"); name != "" {
 			if a, ok := c.anchors[name]; ok {
-				return a
+				return c.takeAnchor(a)
 			}
 		}
 	}
 	return 0
+}
+
+// takeAnchor marks a as used and returns it, or 0 when another node already
+// took it.
+func (c *converter) takeAnchor(a render.AnchorID) render.AnchorID {
+	if a == 0 {
+		return 0
+	}
+	if c.usedAnch == nil {
+		c.usedAnch = map[render.AnchorID]bool{}
+	}
+	if c.usedAnch[a] {
+		return 0
+	}
+	c.usedAnch[a] = true
+	return a
 }
 
 // linkFor returns the Node.Link value of an <a href>: external URLs keep their
@@ -487,6 +560,9 @@ func (c *converter) emit(parent render.NodeID, kids []*hnode, pending bool, cur 
 			continue
 		}
 		if skippedTags[n.tag] {
+			if n.tag == "math" {
+				c.dropf(render.InvalidNode, "<math> MathML content is not supported by the render IR; the formula is dropped")
+			}
 			pending = false
 			continue
 		}
@@ -509,12 +585,25 @@ func (c *converter) emitElement(parent render.NodeID, n *hnode, cs computed, pen
 		c.addChild(parent, render.Node{Kind: render.NodeBreak, Anchor: c.anchorFor(n)})
 		return false
 	case "img":
-		c.addImage(parent, attr(n, "src"), parsePixels(attr(n, "width")), parsePixels(attr(n, "height")), c.anchorFor(n))
+		c.addImage(parent, "img", attr(n, "src"), parsePixels(attr(n, "width")), parsePixels(attr(n, "height")), c.anchorFor(n))
+		return false
+	case "image":
+		// A bare SVG <image> that is not inside an <svg> element: the vector
+		// wrapper is gone, but the raster reference still names an image.
+		c.addImage(parent, "image", firstAttr(n, "xlink:href", "href", "src"), parsePixels(attr(n, "width")), parsePixels(attr(n, "height")), c.anchorFor(n))
 		return false
 	case "svg":
 		href, w, h := svgImage(n)
-		c.addImage(parent, href, w, h, c.anchorFor(n))
+		if href == "" {
+			c.dropf(render.InvalidNode, "<svg> has no <image> raster and vector drawing is not supported; the svg is dropped")
+			return false
+		}
+		c.addImage(parent, "svg", href, w, h, c.anchorFor(n))
 		return false
+	case "ruby":
+		// The children are still emitted, so no text is lost, but the reading
+		// annotation stops being ruby: it becomes plain inline text.
+		c.dropf(render.InvalidNode, "<ruby> annotation is flattened into the running text; ruby layout is not represented")
 	case "hr":
 		// An empty block with a bottom border: render draws it as a rule, and
 		// the margins come from the UA sheet or the book's own CSS.
@@ -522,8 +611,13 @@ func (c *converter) emitElement(parent render.NodeID, n *hnode, cs computed, pen
 		return false
 	case "table":
 		block := c.container(parent, render.NodeBlock, c.styleOf(cs), n)
+		c.dropf(block, "<table> linearized into one block per row; columns, column widths and cell spans are not represented")
 		c.withLink(n, func() { c.emitTable(block, n, cs) })
 		return false
+	}
+	if unsupportedContentTags[n.tag] {
+		c.dropf(render.InvalidNode, "<%s> media or control content is not rendered; any fallback text is kept", n.tag)
+		return c.emit(parent, n.children, pending, cs)
 	}
 	if n.tag == "pre" {
 		stripPreNewline(n)
@@ -671,11 +765,15 @@ func romanLabel(n int) string {
 // emitTable linearizes a table into blocks that render's IR can express:
 // one block per row, cells joined by a visible bar, header cells bold. Column
 // widths and row/col spans are not represented; real grid layout needs a new
-// node model in render (see layx/docs/design.md).
+// node model in render (see the design notes in docs/design.md).
 func (c *converter) emitTable(parent render.NodeID, n *hnode, cur computed) {
 	for i, child := range n.children {
 		if child.tag == "" {
-			// Stray text between rows (usually indentation) carries no meaning.
+			// Stray text between rows is usually indentation, which carries no
+			// meaning. Text that a reader would see is content, and is reported.
+			if strings.TrimSpace(child.text) != "" {
+				c.dropf(render.InvalidNode, "text directly inside <%s> is not in a cell; dropped", n.tag)
+			}
 			continue
 		}
 		depth := len(c.path)
@@ -696,6 +794,7 @@ func (c *converter) emitTable(parent render.NodeID, n *hnode, cur computed) {
 			c.emitRow(row, child, cs)
 		case "colgroup", "col":
 			// Column hints cannot be honoured without a grid.
+			c.dropf(render.InvalidNode, "<%s> column hints are not represented without a table grid; widths and spans are ignored", child.tag)
 		default:
 			// A wrapper such as <div> inside <table> is transparent.
 			c.emitTable(parent, child, cs)
@@ -708,6 +807,13 @@ func (c *converter) emitRow(row render.NodeID, tr *hnode, cur computed) {
 	wrote := false
 	for i, cell := range tr.children {
 		if cell.tag != "td" && cell.tag != "th" {
+			if cell.tag == "" {
+				if strings.TrimSpace(cell.text) != "" {
+					c.dropf(render.InvalidNode, "text directly inside <tr> is not in a cell; dropped")
+				}
+			} else {
+				c.dropf(render.InvalidNode, "<%s> directly inside <tr> is not a table cell; its content is dropped", cell.tag)
+			}
 			continue
 		}
 		depth := len(c.path)
@@ -716,6 +822,11 @@ func (c *converter) emitRow(row render.NodeID, tr *hnode, cur computed) {
 		if cs.display == displayNone {
 			c.path = c.path[:depth]
 			continue
+		}
+		for _, span := range [...]string{"colspan", "rowspan"} {
+			if v := attr(cell, span); v != "" && v != "1" {
+				c.dropf(render.InvalidNode, "<%s %s=%q> cell spans are not represented; the cell is linearized in place", cell.tag, span, v)
+			}
 		}
 		if wrote {
 			c.addText(row, " ｜ ")
@@ -738,12 +849,19 @@ func (c *converter) emitRow(row render.NodeID, tr *hnode, cur computed) {
 	}
 }
 
-func (c *converter) addImage(parent render.NodeID, href string, widthHint, heightHint float32, anchor render.AnchorID) {
-	if href == "" || c.resolve == nil {
+func (c *converter) addImage(parent render.NodeID, tag, href string, widthHint, heightHint float32, anchor render.AnchorID) {
+	href = strings.TrimSpace(href)
+	if href == "" {
+		c.dropf(render.InvalidNode, "<%s> names no image source; the image is dropped", tag)
+		return
+	}
+	if c.resolve == nil {
+		c.dropf(render.InvalidNode, "<%s src=%q>: this build has no image resolver; the image is dropped", tag, href)
 		return
 	}
 	id, w, h, ok := c.resolve(href, widthHint, heightHint)
 	if !ok {
+		c.dropf(render.InvalidNode, "<%s src=%q>: image bytes are missing, unreadable, or not a decodable image; the image is dropped", tag, href)
 		return
 	}
 	c.addChild(parent, render.Node{Kind: render.NodeImage, Image: id, Width: w, Height: h, Anchor: anchor})

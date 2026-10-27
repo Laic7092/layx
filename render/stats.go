@@ -152,6 +152,102 @@ func (e *Engine) ResetStats() {
 	e.shapes.Store(0)
 }
 
+// LayoutStats reports where one Layout or Relayout call spent its time.
+//
+// Unlike Engine.Stats, which accumulates over every call since New, LayoutStats
+// is attached to the layout it produced and attributes work to that call only,
+// even when the Engine runs several layouts concurrently:
+//
+//	l, err := eng.Layout(ctx, doc, opts)
+//	if err == nil {
+//		log.Printf("layout took %v, %d shapes", l.Stats().Total, l.Stats().Shapes)
+//	}
+//
+// Durations are only measured when the Engine was created with
+// Options.Measure. Without it every duration is zero and the layout path
+// performs no clock reads; Shapes, Tasks, Pages and Tiles are always counted.
+//
+// Stack and Paginate are summed over the parallel chapter workers, so on a
+// multi-core machine they can exceed Total: they are worker time, not wall time.
+// Keys, Break, Assemble and Total are wall time; Break includes the parallel
+// paragraph phase the caller waits for.
+type LayoutStats struct {
+	// Total is the wall time of the call: from after option validation to just
+	// before the OnIssue replay. It is zero when Measure is off.
+	Total time.Duration
+	// Keys, Break, Stack, Paginate and Assemble attribute the call's stages.
+	// Stack and Paginate are summed across the parallel chapter workers.
+	Keys     time.Duration
+	Break    time.Duration
+	Stack    time.Duration
+	Paginate time.Duration
+	Assemble time.Duration
+	// Shapes is the number of shaping calls this layout performed. It is
+	// counted even when Measure is off.
+	Shapes int64
+	// Tasks is the number of work items this call handed to parallel phases
+	// (chapters, paragraphs, page maps). It is counted even when Measure is
+	// off.
+	Tasks int64
+	// Pages is the number of page maps the call produced, i.e. the page count
+	// of a paged layout. It is 0 in scroll mode, where pages are not part of
+	// the output.
+	Pages int
+	// Tiles is the scroll tile count of the call, and 0 in paged mode.
+	Tiles int
+}
+
+// Stats returns the phase attribution of the Layout call that produced this
+// Layout. The value is a snapshot: later calls on the same Engine do not change
+// it.
+func (l *Layout) Stats() LayoutStats { return l.stats }
+
+// layoutRun accumulates the per-call counters and timings of one layoutDoc
+// call. Scalar fields are written by the calling goroutine; atomics are what
+// parallel chapter workers add.
+type layoutRun struct {
+	shapes     atomic.Int64
+	stackNs    atomic.Int64
+	paginateNs atomic.Int64
+	tasks      int64
+	keys       time.Duration
+	brk        time.Duration
+	assemble   time.Duration
+}
+
+// addTasks records that a parallel phase was handed n work items.
+func (run *layoutRun) addTasks(n int) {
+	if n > 0 {
+		run.tasks += int64(n)
+	}
+}
+
+// elapsed returns the time since start, or zero when start is the zero time a
+// disabled timer returns. It is the per-call counterpart of Engine.stop.
+func (e *Engine) elapsed(start time.Time) time.Duration {
+	if start.IsZero() {
+		return 0
+	}
+	return time.Since(start)
+}
+
+// stats snapshots the run for a finished layout. total is measured separately
+// because it spans the whole call.
+func (run *layoutRun) stats(l *Layout, total time.Duration) LayoutStats {
+	return LayoutStats{
+		Total:    total,
+		Keys:     run.keys,
+		Break:    run.brk,
+		Stack:    time.Duration(run.stackNs.Load()),
+		Paginate: time.Duration(run.paginateNs.Load()),
+		Assemble: run.assemble,
+		Shapes:   run.shapes.Load(),
+		Tasks:    run.tasks,
+		Pages:    l.PageCount(),
+		Tiles:    l.TileCount(),
+	}
+}
+
 // mark starts a phase timer. It returns the zero time when timing is off, so
 // stop becomes a no-op and the hot path performs no clock read.
 func (e *Engine) mark() time.Time {

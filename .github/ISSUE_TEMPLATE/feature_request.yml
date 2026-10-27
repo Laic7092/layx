@@ -1,0 +1,83 @@
+name: Feature request
+description: Propose new API, a layout capability, a diagnostic, or a packaging change.
+title: "[feature] "
+labels: []
+body:
+  - type: markdown
+    attributes:
+      value: |
+        layx keeps a deliberately small surface: the core is layout, not
+        parsing or rasterization (see `docs/design.md`). Features that need a
+        new layout model (tables, ruby, vertical writing, flex/grid) are large
+        projects — please describe the host problem first, the API second.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: The host problem
+      description: |
+        What is your host trying to do, and what does it have to do today
+        instead? Concrete beats hypothetical: which reader/app/pipeline, which
+        input, which user-visible failure.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed API or behaviour
+      description: |
+        Sketches are welcome. Say what the zero value should mean, whether it
+        changes line breaking/pagination/painting (and therefore the cache
+        keys), and whether a diagnostic (`Issue`) would be enough instead of
+        new API.
+      render: go
+    validations:
+      required: false
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Workarounds you tried, other libraries, or why the host cannot do this itself.
+    validations:
+      required: false
+
+  - type: dropdown
+    id: kind
+    attributes:
+      label: Kind of change
+      options:
+        - New public API (additive)
+        - Behaviour change / default change
+        - Breaking API change (pre-1.0 minor bump accepted)
+        - New dependency
+        - New layout model (IR change)
+        - Diagnostics / error quality
+        - Packaging / tooling / docs
+    validations:
+      required: true
+
+  - type: dropdown
+    id: scope
+    attributes:
+      label: Which package
+      options:
+        - github.com/laix/layx/render
+        - github.com/laix/layx/render/paint
+        - github.com/laix/layx/render/hyphen/en
+        - github.com/laix/layx/epub
+        - examples / tools / scripts
+        - docs
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Housekeeping
+      options:
+        - label: I searched existing issues first.
+          required: true
+        - label: This is not a security report (those go through SECURITY.md).
+          required: true

@@ -1,7 +1,6 @@
 package render
 
 import (
-	"fmt"
 	"runtime"
 	"sync"
 	"sync/atomic"
@@ -28,16 +27,47 @@ type Options struct {
 	// default so the layout path performs no clock reads; enabling it does not
 	// change layout results.
 	Measure bool
+	// OnIssue, if non-nil, receives one call per diagnostic issue raised by a
+	// Layout or Relayout call. Issues are delivered after the call completes,
+	// on the goroutine that called it, so the callback never runs concurrently
+	// with itself and may call back into the library. The same list is
+	// available afterwards from Layout.Issues.
+	//
+	// Diagnostics cover what the library decides to drop or substitute rather
+	// than fail on: an unknown font family, runes no face covers, content the
+	// IR cannot express. They never change layout results.
+	OnIssue func(Issue)
 }
 
 // Limits bounds the resources consumed by a single Layout call. A zero field
 // uses the corresponding default.
+//
+// Every limit is a hard cap: a layout that would exceed one fails with
+// ErrLimitExceeded instead of allocating its way out of memory.
 type Limits struct {
 	MaxNodes       int
 	MaxDepth       int
 	MaxTextRunes   int
 	MaxImagePixels int64
+	// MaxPages bounds the number of pages a paged layout may produce. It is
+	// what stops a configuration (one-nanometre margins, say) from turning a
+	// modest document into millions of page boxes.
+	MaxPages int
+	// MaxTiles bounds the number of tiles a scroll layout may produce. The
+	// tile count is content height divided by TileHeight, so it is the limit
+	// that bites when TileHeight is tiny.
+	MaxTiles int
+	// MaxLines bounds the number of line boxes a layout may build. It catches
+	// documents that stay under MaxTextRunes but break into an absurd number
+	// of very short lines.
+	MaxLines int
 }
+
+// MinTileHeight is the smallest accepted LayoutOptions.TileHeight in CSS
+// pixels. Below it one extra pixel of content height adds another tile, so the
+// tile count explodes without the input being unusual; a layout with a smaller
+// non-zero TileHeight fails with ErrInvalidOptions.
+const MinTileHeight = 16
 
 // DefaultLimits returns the limits used for zero-valued Limits fields.
 func DefaultLimits() Limits {
@@ -46,6 +76,9 @@ func DefaultLimits() Limits {
 		MaxDepth:       256,
 		MaxTextRunes:   20_000_000,
 		MaxImagePixels: 64 << 20,
+		MaxPages:       100_000,
+		MaxTiles:       100_000,
+		MaxLines:       2_000_000,
 	}
 }
 
@@ -62,6 +95,15 @@ func (l Limits) withDefaults() Limits {
 	}
 	if l.MaxImagePixels <= 0 {
 		l.MaxImagePixels = d.MaxImagePixels
+	}
+	if l.MaxPages <= 0 {
+		l.MaxPages = d.MaxPages
+	}
+	if l.MaxTiles <= 0 {
+		l.MaxTiles = d.MaxTiles
+	}
+	if l.MaxLines <= 0 {
+		l.MaxLines = d.MaxLines
 	}
 	return l
 }
@@ -154,34 +196,51 @@ type LayoutOptions struct {
 	// line breaking or vertical stacking, so toggling it reuses cached flow.
 	Mode Mode
 	// TileHeight is the height of a scroll tile in content pixels. Zero uses
-	// Viewport.Height. It is ignored in paged mode.
+	// Viewport.Height. It is ignored in paged mode. A non-zero value below
+	// MinTileHeight is rejected with ErrInvalidOptions: one extra pixel of
+	// content height would add another tile, so such a configuration can turn a
+	// short book into hundreds of thousands of tile boxes.
 	TileHeight float32
 	// Hyphenator supplies intra-word break points for blocks whose style sets
 	// Hyphenate. Nil disables hyphenation, and the zero value keeps the old
 	// line breaking. Its Name participates in BreakKey.
 	Hyphenator Hyphenator
+	// Range restricts the layout to chapters [First, Last) of the document;
+	// nil means the whole document. Page numbers start at 0 for the range.
+	Range *ChapterRange
 }
 
 func (o LayoutOptions) validate() (LayoutOptions, error) {
+	// Non-finite floats before anything else. The range checks below are all
+	// "x <= 0"-shaped and NaN compares false to every one of them, so without
+	// this pass a NaN would sail through and poison page geometry. The check
+	// also has to precede withDefaults, which treats non-positive values
+	// (including NaN) as unset.
+	if err := validateLayoutOptionsFinite(o); err != nil {
+		return o, err
+	}
 	if o.Viewport.Width <= 0 || o.Viewport.Height <= 0 {
-		return o, fmt.Errorf("%w: viewport must be positive", ErrInvalidOptions)
+		return o, docErrorf(ErrInvalidOptions, "viewport must be positive")
 	}
 	if o.Mode > ModeScroll {
-		return o, fmt.Errorf("%w: unknown mode %d", ErrInvalidOptions, o.Mode)
+		return o, docErrorf(ErrInvalidOptions, "unknown mode %d", o.Mode)
 	}
 	if o.TileHeight < 0 {
-		return o, fmt.Errorf("%w: tile height must not be negative", ErrInvalidOptions)
+		return o, docErrorf(ErrInvalidOptions, "tile height must not be negative")
+	}
+	if o.TileHeight > 0 && o.TileHeight < MinTileHeight {
+		return o, docErrorf(ErrInvalidOptions, "tile height %v is below the minimum %d", o.TileHeight, MinTileHeight)
 	}
 	contentW := o.Viewport.Width - o.Margins.Left - o.Margins.Right
 	contentH := o.Viewport.Height - o.Margins.Top - o.Margins.Bottom
 	if contentW <= 0 || contentH <= 0 {
-		return o, fmt.Errorf("%w: margins leave no content box", ErrInvalidOptions)
+		return o, docErrorf(ErrInvalidOptions, "margins leave no content box")
 	}
 	if o.Margins.Left < 0 || o.Margins.Right < 0 || o.Margins.Top < 0 || o.Margins.Bottom < 0 {
-		return o, fmt.Errorf("%w: margins must not be negative", ErrInvalidOptions)
+		return o, docErrorf(ErrInvalidOptions, "margins must not be negative")
 	}
 	if o.Fonts == nil {
-		return o, fmt.Errorf("%w: Fonts is required", ErrNoFonts)
+		return o, docErrorf(ErrNoFonts, "Fonts is required")
 	}
 	o.Typography = o.Typography.withDefaults()
 	return o, nil
@@ -226,6 +285,10 @@ type Engine struct {
 	// must not increment it; tests use it to prove the cache works.
 	shapes atomic.Int64
 
+	// onIssue is Options.OnIssue. Each Layout/Relayout replays its collected
+	// issues into it after the workers join, on the calling goroutine.
+	onIssue func(Issue)
+
 	measure bool
 	stats   statsCounters
 }
@@ -233,16 +296,16 @@ type Engine struct {
 // New creates an Engine.
 func New(opts Options) (*Engine, error) {
 	if opts.Workers < 0 {
-		return nil, fmt.Errorf("%w: negative worker count", ErrInvalidOptions)
+		return nil, docErrorf(ErrInvalidOptions, "negative worker count")
 	}
 	if opts.PageCache < 0 {
-		return nil, fmt.Errorf("%w: negative page cache size", ErrInvalidOptions)
+		return nil, docErrorf(ErrInvalidOptions, "negative page cache size")
 	}
 	if opts.TileCache < 0 {
-		return nil, fmt.Errorf("%w: negative tile cache size", ErrInvalidOptions)
+		return nil, docErrorf(ErrInvalidOptions, "negative tile cache size")
 	}
 	if opts.LineCache < 0 {
-		return nil, fmt.Errorf("%w: negative line cache size", ErrInvalidOptions)
+		return nil, docErrorf(ErrInvalidOptions, "negative line cache size")
 	}
 	workers := opts.Workers
 	if workers == 0 {
@@ -270,6 +333,7 @@ func New(opts Options) (*Engine, error) {
 		lineCache: lineCache,
 		limits:    opts.Limits.withDefaults(),
 		budget:    newBudget(workers),
+		onIssue:   opts.OnIssue,
 		measure:   opts.Measure,
 		stats:     statsCounters{busy: make([]atomic.Int64, workers)},
 	}, nil

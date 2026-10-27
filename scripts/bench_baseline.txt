@@ -1,0 +1,11 @@
+# Benchmark baselines for scripts/benchgate.sh (median ns/op).
+# Captured on: AMD Ryzen 7 7800X3D 8-Core Processor            / go version go1.27.2 linux/amd64 / linux/amd64
+#
+# Coarse by design: absolute ns/op differs between machines and CI hardware,
+# and the gate only allows BENCH_TOL (default 1.5x) of slowdown.
+# Refresh with: scripts/benchgate.sh --update
+# The layout benchmarks need a CJK font (LAYX_CJK_FONT or a system one).
+BenchmarkLayoutScale/workers=1	45311773
+BenchmarkLayout200K	8803013
+BenchmarkPageDraw	7385
+BenchmarkHitTest	954.3

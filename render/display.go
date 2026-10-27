@@ -38,6 +38,10 @@ type linePainter struct {
 	// w is the leased worker of the inline path; out is the parallel result.
 	w   *textWorker
 	out []linePaint
+	// err is the first panic recovered while building the parallel batch (it
+	// wraps ErrInternal). The display list of that batch is incomplete: the
+	// caller must not cache the page or tile it belongs to.
+	err error
 }
 
 // newPainter starts painting jobs. The inline path leases a worker until close;
@@ -53,10 +57,12 @@ func (l *Layout) newPainter(jobs []lineJob) linePainter {
 		return p
 	}
 	p.out = make([]linePaint, len(jobs))
-	l.engine.parallelFor(context.Background(), len(jobs), func(i int) {
+	p.err = l.engine.parallelFor(context.Background(), len(jobs), func(i int) {
 		w := l.leaseWorker()
+		// The worker must come back to the pool even if painting panics:
+		// runTask recovers the panic after this defer has run.
+		defer l.releaseWorker(w)
 		l.paintLineInto(w, &jobs[i], &p.out[i].ops, &p.out[i].links, true)
-		l.releaseWorker(w)
 	})
 	return p
 }

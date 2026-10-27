@@ -1,16 +1,20 @@
 package epub
 
 import (
+	"fmt"
 	"strconv"
 	"strings"
 	"unicode"
+
+	"github.com/laix/layx/render"
 )
 
 // This file is a small CSS reader for EPUB content: a stylesheet parser, a
 // selector matcher and the declarations the cascade understands. It is not a
-// browser: the supported surface follows the corpus ledger in
-// layx-reader/docs/css-census.md, and everything outside it is dropped rather
-// than approximated.
+// browser: the supported surface follows the CSS census the reader was built
+// from, and everything outside it is dropped rather than approximated. What it
+// drops is reported through Options.OnIssue when a collector is attached, so a
+// host can explain the difference instead of silently losing it.
 
 // declaration is one `property: value` pair, with !important folded out.
 type declaration struct {
@@ -40,17 +44,51 @@ type cssSheet struct {
 // parseCSS parses a stylesheet. Malformed input never fails the book: an
 // unreadable rule is dropped and the rest of the sheet still applies.
 func parseCSS(src string) cssSheet {
+	return parseCSSWith(src, "", nil)
+}
+
+// parseCSSWith is parseCSS for the converter. label names the stylesheet in
+// diagnostics (an archive path, or a chapter path for an inline <style>), and
+// issues receives what the parser had to ignore: @font-face rules (embedded
+// fonts are not loaded), at-rules the reader does not implement, and rules
+// whose selectors the matcher cannot honour. A nil collector discards them,
+// which is what the user-agent sheet and most unit tests use.
+func parseCSSWith(src, label string, issues *issueCollector) cssSheet {
 	var sheet cssSheet
 	src = stripCSSComments(src)
 	// Old HTML wrappers around <style> content: `<!-- ... -->`. XHTML does
 	// not need them, but a few hand-made EPUBs still ship them.
 	src = strings.ReplaceAll(src, "<!--", " ")
 	src = strings.ReplaceAll(src, "-->", " ")
-	parseCSSLevel(src, &sheet)
+	p := cssParser{label: label, issues: issues}
+	p.parseLevel(src, &sheet)
+	if p.droppedRules > 0 {
+		p.report("%d rule(s) were ignored because none of their selectors are supported", p.droppedRules)
+	}
 	return sheet
 }
 
-func parseCSSLevel(src string, sheet *cssSheet) {
+// cssParser is one stylesheet parse. It exists to carry the diagnostic label
+// and counters through the recursive @media/@supports handling.
+type cssParser struct {
+	label        string
+	issues       *issueCollector
+	droppedRules int
+}
+
+// report records one stylesheet diagnostic, prefixed with the sheet's label.
+func (p *cssParser) report(format string, args ...any) {
+	if p.issues == nil {
+		return
+	}
+	detail := fmt.Sprintf(format, args...)
+	if p.label != "" {
+		detail = p.label + ": " + detail
+	}
+	p.issues.add(render.IssueDroppedContent, "", render.InvalidNode, "%s", detail)
+}
+
+func (p *cssParser) parseLevel(src string, sheet *cssSheet) {
 	i := 0
 	for i < len(src) {
 		for i < len(src) && (src[i] == ' ' || src[i] == '\t' || src[i] == '\n' || src[i] == '\r' || src[i] == '\f' || src[i] == ';') {
@@ -74,7 +112,9 @@ func parseCSSLevel(src string, sheet *cssSheet) {
 				// uses them only to pick screen vs print, never to react to a
 				// width. @supports is equally unconditional here.
 				if name == "media" || name == "supports" || name == "document" {
-					parseCSSLevel(src[k+1:end], sheet)
+					p.parseLevel(src[k+1:end], sheet)
+				} else {
+					p.droppedAtRule(name, src[k+1:end])
 				}
 				i = end + 1
 			case name == "import":
@@ -83,6 +123,12 @@ func parseCSSLevel(src string, sheet *cssSheet) {
 				}
 				i = k + 1
 			default:
+				// A statement at-rule such as @namespace or @layer: there is no
+				// block to parse, and nothing here implements it. @charset is
+				// metadata, not content, so it stays silent.
+				if name != "" && name != "charset" {
+					p.report("@%s is not supported; the rule is ignored", name)
+				}
 				i = k
 				if delim == ';' {
 					i++
@@ -95,13 +141,73 @@ func parseCSSLevel(src string, sheet *cssSheet) {
 			return
 		}
 		end := matchBrace(src, k)
-		selectors := parseSelectorList(strings.TrimSpace(src[i:k]))
+		selText := strings.TrimSpace(src[i:k])
+		selectors := parseSelectorList(selText)
 		decls := parseDeclarations(src[k+1 : end])
+		if len(decls) > 0 && len(selectors) == 0 && selText != "" {
+			// The rule can never match, so every declaration in it is dead.
+			// One aggregated note per sheet keeps this from flooding the list.
+			p.droppedRules++
+		}
 		if len(selectors) > 0 && len(decls) > 0 {
 			sheet.parts = append(sheet.parts, cssPart{rule: cssRule{selectors: selectors, decls: decls}})
 		}
 		i = end + 1
 	}
+}
+
+// droppedAtRule reports an at-rule the reader does not implement. @font-face is
+// the one that changes reading: the book's embedded face never reaches the
+// FontSet, so its text is drawn with the host's fallback.
+func (p *cssParser) droppedAtRule(name, body string) {
+	switch name {
+	case "font-face":
+		family, source := "", ""
+		for _, d := range parseDeclarations(body) {
+			switch d.prop {
+			case "font-family":
+				family = unquoteCSS(strings.TrimSpace(d.value))
+			case "src":
+				if source == "" {
+					source = firstCSSURL(d.value)
+				}
+			}
+		}
+		msg := "an embedded @font-face font is not loaded; its text falls back to the host font"
+		if family != "" {
+			msg = fmt.Sprintf("embedded @font-face font %q is not loaded; its text falls back to the host font", family)
+		}
+		if source != "" {
+			msg += " (source " + source + ")"
+		}
+		p.report("%s", msg)
+	case "page":
+		p.report("@page rules are ignored: page geometry for print does not apply to reflowed output")
+	case "charset":
+		// An encoding declaration is metadata, not content: nothing is lost.
+	case "namespace":
+		p.report("@namespace is not supported: namespaced selectors cannot match, so their rules are ignored")
+	case "":
+		p.report("a malformed @-rule was ignored")
+	default:
+		p.report("@%s is not supported; its contents were ignored", name)
+	}
+}
+
+// firstCSSURL returns the URL of a src-ish value, either "url(x)" or a quoted
+// string, or "".
+func firstCSSURL(v string) string {
+	if idx := strings.Index(strings.ToLower(v), "url("); idx >= 0 {
+		if end := strings.IndexByte(v[idx:], ')'); end > 0 {
+			return unquoteCSS(strings.TrimSpace(v[idx+4 : idx+end]))
+		}
+	}
+	if len(v) > 0 && (v[0] == '"' || v[0] == '\'') {
+		if end := strings.IndexByte(v[1:], v[0]); end >= 0 {
+			return v[1 : 1+end]
+		}
+	}
+	return ""
 }
 
 func isIdentByte(c byte) bool {

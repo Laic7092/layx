@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/laix/layx/render"
 )
@@ -70,6 +71,45 @@ type Book struct {
 	anchorIDs   []map[string]render.AnchorID
 	nextAnchor  render.AnchorID
 	linkTargets map[string]LinkTarget
+
+	// issuesMu guards issues, which a shelf may read on one goroutine while a
+	// builder runs on another. openIssues is written once by Open and folded
+	// into every build's list, so a host that only opens the container still
+	// sees which spine or navigation documents could not be read.
+	issuesMu   sync.Mutex
+	issues     []render.Issue
+	openIssues []render.Issue
+}
+
+// Issues returns a copy of the diagnostics collected by the most recent Open or
+// Build call: content the converter had to drop or flatten (a linearized table,
+// an image whose bytes are missing, a ruby annotation, a MathML formula), CSS
+// the cascade could not apply (@font-face, unsupported at-rules and selectors),
+// and spine or navigation documents that could not be read.
+//
+// The list is replaced by every Build/BuildWith call and starts with the issues
+// Open found. A clean book returns nil. Issues is the pull form of
+// Options.OnIssue: the same entries, with the callback delivered once per issue
+// after each build finishes.
+func (b *Book) Issues() []render.Issue {
+	b.issuesMu.Lock()
+	defer b.issuesMu.Unlock()
+	return copyIssues(b.issues)
+}
+
+// setIssues stores the diagnostic list of the last completed Open or Build.
+func (b *Book) setIssues(list []render.Issue) {
+	b.issuesMu.Lock()
+	b.issues = list
+	b.issuesMu.Unlock()
+}
+
+// openIssueList returns the diagnostics Open collected, for folding into a
+// build's list.
+func (b *Book) openIssueList() []render.Issue {
+	b.issuesMu.Lock()
+	defer b.issuesMu.Unlock()
+	return copyIssues(b.openIssues)
 }
 
 // openEPUB reads an EPUB file and returns its reading order. The archive
@@ -81,6 +121,11 @@ func openEPUB(file string) (*Book, error) {
 		return nil, fmt.Errorf("epub: open %s: %w", file, err)
 	}
 	defer zr.Close()
+
+	// Diagnostics found while reading the container are kept on the Book and
+	// replayed by the next Build, so a host that never calls Build still sees
+	// which parts of the reading order were lost.
+	issues := newIssueCollector()
 
 	abs, err := filepath.Abs(file)
 	if err != nil {
@@ -166,17 +211,26 @@ func openEPUB(file string) (*Book, error) {
 		href := resolve(opfPath, it.Href)
 		data, err := read(href)
 		if err != nil {
+			issues.add(render.IssueDroppedContent, "", render.InvalidNode, "navigation document %q is missing from the archive; its table of contents is unavailable", href)
 			continue
 		}
 		if navNodes = parseNavTOC(data, href); len(navNodes) > 0 {
 			break
 		}
+		issues.add(render.IssueDroppedContent, "", render.InvalidNode, "navigation document %q has no usable toc list; its table of contents is unavailable", href)
 	}
 	if len(navNodes) == 0 && pkg.Spine.Toc != "" {
 		if it, ok := manifest[pkg.Spine.Toc]; ok {
 			if data, err := read(it.href); err == nil {
 				navNodes = parseNCX(data, it.href)
+				if len(navNodes) == 0 {
+					issues.add(render.IssueDroppedContent, "", render.InvalidNode, "NCX navigation document %q has no navPoints; its table of contents is unavailable", it.href)
+				}
+			} else {
+				issues.add(render.IssueDroppedContent, "", render.InvalidNode, "NCX navigation document %q is missing or unreadable; its table of contents is unavailable", it.href)
 			}
+		} else {
+			issues.add(render.IssueDroppedContent, "", render.InvalidNode, "the spine names NCX document %q but the manifest has no such item; its table of contents is unavailable", pkg.Spine.Toc)
 		}
 	}
 	tocTitles := map[string]string{}
@@ -190,12 +244,15 @@ func openEPUB(file string) (*Book, error) {
 		}
 		it, ok := manifest[ref.IDRef]
 		if !ok {
+			issues.add(render.IssueDroppedContent, "", render.InvalidNode, "spine item %q has no matching manifest item; the chapter is skipped", ref.IDRef)
 			continue
 		}
 		if it.mediaType != "" && !isHTMLMediaType(it.mediaType) {
+			issues.add(render.IssueDroppedContent, "", render.InvalidNode, "spine item %q is %q, not XHTML; the chapter is skipped", it.href, it.mediaType)
 			continue
 		}
 		if seen[it.href] {
+			issues.add(render.IssueDroppedContent, "", render.InvalidNode, "spine item %q appears more than once in the spine; the duplicate is skipped", it.href)
 			continue
 		}
 		seen[it.href] = true
@@ -204,6 +261,7 @@ func openEPUB(file string) (*Book, error) {
 			// One unreadable spine item (a missing file, a bad zip entry)
 			// must not cost the reader the rest of the book. If every item
 			// fails the empty-check below reports it.
+			issues.add(render.IssueDroppedContent, "", render.InvalidNode, "spine item %q is missing from the archive or unreadable; the chapter is skipped", it.href)
 			continue
 		}
 		title := tocTitles[it.href]
@@ -252,6 +310,11 @@ func openEPUB(file string) (*Book, error) {
 	if b.Title == "" {
 		b.Title = "未命名书籍"
 	}
+	// Keep the diagnostics collected above: Issues is useful before the first
+	// Build, and every Build folds this list in front of its own.
+	open := issues.flush()
+	b.openIssues = open
+	b.issues = copyIssues(open)
 	return b, nil
 }
 
@@ -278,9 +341,34 @@ func (b *Book) Build(base float32) (*render.Document, map[render.ImageID][]byte,
 }
 
 // BuildWith is Build with the host's choices: a base font size for headings and
-// indents, the colour link text is painted in, and whether the host owns ink
-// and percentage lengths.
+// indents, the colour link text is painted in, whether the host owns ink and
+// percentage lengths, and the diagnostic callback.
+//
+// Diagnostics: OnIssue is called once per issue this build reports (plus the
+// ones Open found), after the conversion has finished and before BuildWith
+// returns, on the calling goroutine; no two calls overlap. A clean book never
+// calls it. Book.Issues holds the same list afterwards even when OnIssue is nil,
+// and a failed build still reports what it found before failing.
 func (b *Book) BuildWith(base float32, o Options) (*render.Document, map[render.ImageID][]byte, error) {
+	issues := newIssueCollector()
+	for _, i := range b.openIssueList() {
+		issues.report(i)
+	}
+	doc, images, err := b.buildWith(base, o, issues)
+	list := issues.flush()
+	b.setIssues(list)
+	if o.OnIssue != nil {
+		for _, i := range list {
+			o.OnIssue(i)
+		}
+	}
+	return doc, images, err
+}
+
+// buildWith is BuildWith's body. It takes the collector instead of allocating
+// one, so BuildWith can flush and deliver exactly once on the caller's goroutine
+// whatever the outcome.
+func (b *Book) buildWith(base float32, o Options, issues *issueCollector) (*render.Document, map[render.ImageID][]byte, error) {
 	if base <= 0 {
 		base = 18
 	}
@@ -293,6 +381,7 @@ func (b *Book) BuildWith(base float32, o Options) (*render.Document, map[render.
 		out:    map[render.ImageID][]byte{},
 		sizes:  map[render.ImageID][2]float32{},
 		sheets: map[string]cssSheet{},
+		issues: issues,
 	}
 	if b.path != "" {
 		// The archive is reopened for image bytes and stylesheets. A book whose
@@ -332,7 +421,7 @@ func (b *Book) BuildWith(base float32, o Options) (*render.Document, map[render.
 			return nil, nil, fmt.Errorf("epub: chapter %d (%s): %w", i+1, ch.Title, err)
 		}
 		style := newCascadeWithUA(base, o, ua, load.chapterRules(tree, basePath))
-		chapter, err := convertTree(tree, strconv.Itoa(i), render.AnchorID(i+1), load.forBase(basePath), b.chapterAnchors(i), basePath, style, styles)
+		chapter, err := convertTree(tree, strconv.Itoa(i), render.AnchorID(i+1), load.forBase(basePath), b.chapterAnchors(i), basePath, style, styles, issues)
 		if err != nil {
 			return nil, nil, fmt.Errorf("epub: chapter %d (%s): %w", i+1, ch.Title, err)
 		}
@@ -352,9 +441,13 @@ func (b *Book) BuildWith(base float32, o Options) (*render.Document, map[render.
 		}
 	}
 	// The cover page is outside the reading flow, but its image is still
-	// needed for the cover itself.
+	// needed for the cover itself. A cover the archive cannot provide is
+	// content the UI will show as missing, so it is reported like any other
+	// dropped image.
 	if b.HasCover {
-		load.load(b.coverHref, 0, 0)
+		if _, _, _, ok := load.load(b.coverHref, 0, 0); !ok {
+			issues.add(render.IssueDroppedContent, "", render.InvalidNode, "cover image %q is missing from the archive or unreadable; the cover cannot be shown", b.coverHref)
+		}
 	}
 	doc, err := builder.Build()
 	if err != nil {
@@ -371,6 +464,7 @@ type imageLoader struct {
 	files  map[string]*zip.File
 	lower  map[string]*zip.File // lower-cased names, for inconsistent archives
 	sheets map[string]cssSheet  // parsed stylesheets, one entry per archive path
+	issues *issueCollector      // dropped-stylesheet diagnostics, nil-safe
 	out    map[render.ImageID][]byte
 	sizes  map[render.ImageID][2]float32 // intrinsic size of each loaded image
 }

@@ -33,6 +33,10 @@ type Page struct {
 	top     float32
 	ops     []drawOp
 	links   []Link
+	// incomplete marks a display list that a recovered panic or a failed
+	// parallel paint step cut short. Page never caches such a page; building it
+	// again is cheap compared to serving a half-drawn frame from the cache.
+	incomplete bool
 }
 
 // Number returns the zero-based global page number.
@@ -49,6 +53,15 @@ func (p *Page) Size() paint.Size {
 // previous Draw. The same Page may be drawn repeatedly, in any order, from any
 // number of painters; a host that animates a turn can draw old and new pages
 // into one painter with different transforms.
+//
+// Draw calls into host code (the paint.Painter implementation), and the library
+// does not recover panics from it: a panic in a painter method propagates out of
+// Draw into the calling goroutine, exactly like a panic in any other host
+// callback. The painter must guard its own boundary if it wants to keep going;
+// locking a Painter to one goroutine and never panicking from it is the host's
+// side of this contract (see the paint package documentation). Panics raised by
+// the library's own layout and display-list work are a different matter: those
+// are recovered and returned as errors wrapping ErrInternal.
 func (p *Page) Draw(painter paint.Painter) {
 	if painter == nil {
 		return
@@ -104,7 +117,11 @@ func (l *Layout) Page(n int) *Page {
 		l.cacheMu.Unlock()
 	}
 	p := l.renderPage(n)
-	if limit <= 0 {
+	if limit <= 0 || p.incomplete {
+		// A page cut short by a recovered internal error must not enter the
+		// cache: the host would keep drawing a partial frame for every later
+		// request. It is returned once (draw whatever was built), and the next
+		// Page(n) retries the build.
 		return p
 	}
 	l.cacheMu.Lock()
@@ -123,14 +140,26 @@ func (l *Layout) Page(n int) *Page {
 	return p
 }
 
-func (l *Layout) renderPage(n int) *Page {
+func (l *Layout) renderPage(n int) (p *Page) {
 	if l.engine.measure {
 		defer l.engine.notePage(time.Now())
 	}
 	info := &l.pages[n]
 	cf := &l.chapters[info.chapter]
 
-	p := &Page{layout: l, number: n, chapter: info.chapter, top: info.top}
+	p = &Page{layout: l, number: n, chapter: info.chapter, top: info.top}
+	// Building a display list shapes text; like every other internal step it
+	// must turn a bug into a broken page rather than a host crash. The page is
+	// marked incomplete so Page does not cache it (see Page.incomplete).
+	var buildErr error
+	defer func() {
+		if r := recover(); r != nil {
+			buildErr = internalErr(r)
+		}
+		if buildErr != nil {
+			p.incomplete = true
+		}
+	}()
 	if bg := l.opts.Typography.Background; !bg.Transparent() {
 		p.ops = append(p.ops, drawOp{
 			kind:  opFill,
@@ -163,6 +192,11 @@ func (l *Layout) renderPage(n int) *Page {
 	}
 	painter := l.newPainter(jobs)
 	defer painter.close()
+	if painter.err != nil {
+		// Parallel painting recovered a panic. Keep the page out of the cache;
+		// the loop below still appends the lines that were built.
+		buildErr = painter.err
+	}
 
 	k := 0
 	for i := first; i < last; i++ {
@@ -470,11 +504,23 @@ func (p *Page) HitTest(pt paint.Point) (Location, bool) {
 // coordinates. first/last bound the items that may be hit (a page range, or
 // the whole chapter for scroll layouts).
 func (l *Layout) hitTestItems(w *textWorker, cf *chapterFlow, chapter, first, last int, x, y float32) (Location, bool) {
-	if n := cf.count(); last > n {
+	// An empty flow has no items and no unit to look up: unitOf[0] does not
+	// exist. Hit testing is the reader's highest-traffic path (tap to place the
+	// caret, press to select, double-tap to pick a word), so an empty text
+	// node, an empty block or a style-hidden chapter must be a miss, never a
+	// panic (audit §2.2).
+	n := cf.count()
+	if n == 0 {
+		return Location{}, false
+	}
+	if last > n {
 		last = n
 	}
 	if first < 0 {
 		first = 0
+	}
+	if first >= last {
+		return Location{}, false
 	}
 	// Walk unit by unit: a unit's items are contiguous in both the unit and
 	// the line slots, so this touches each line box once instead of looking it

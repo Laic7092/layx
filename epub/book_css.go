@@ -4,6 +4,8 @@ import (
 	"io"
 	"path"
 	"strings"
+
+	"github.com/laix/layx/render"
 )
 
 // styleRef is one place a chapter gets author CSS from: a linked stylesheet or
@@ -66,26 +68,31 @@ func (l *imageLoader) chapterRules(tree *hnode, base string) []cssRule {
 			l.appendSheet(resolve(base, ref.href), 0, seen, &rules)
 			continue
 		}
-		l.appendParts(parseCSS(ref.css), base, 0, seen, &rules)
+		l.appendParts(parseCSSWith(ref.css, base, l.issues), base, 0, seen, &rules)
 	}
 	return rules
 }
 
 // appendSheet flattens one stylesheet into rules. depth caps @import chains at
-// the two levels CSS allows in practice; seen breaks cycles.
+// the two levels CSS allows in practice; seen breaks cycles. A sheet that is
+// missing from the archive is reported: its rules silently not applying is
+// exactly the kind of loss a host cannot otherwise explain.
 func (l *imageLoader) appendSheet(name string, depth int, seen map[string]bool, out *[]cssRule) {
-	if depth > 2 {
-		return
-	}
 	name = path.Clean(strings.TrimPrefix(strings.TrimSpace(name), "/"))
 	if name == "" || name == "." || seen[name] {
+		return
+	}
+	if depth > 2 {
+		l.issues.add(render.IssueDroppedContent, "", render.InvalidNode, "%s: @import chain is deeper than the supported two levels; further rules are ignored", name)
 		return
 	}
 	seen[name] = true
 	sheet, ok := l.sheets[name]
 	if !ok {
 		if data, found := l.readFile(name); found {
-			sheet = parseCSS(string(data))
+			sheet = parseCSSWith(string(data), name, l.issues)
+		} else {
+			l.issues.add(render.IssueDroppedContent, "", render.InvalidNode, "%s: stylesheet is missing from the archive; its rules are ignored", name)
 		}
 		l.sheets[name] = sheet
 	}

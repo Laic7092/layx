@@ -4,6 +4,18 @@
 // The package intentionally contains no rasterizer, image decoder or font
 // loader. A host implements Painter on top of a GPU, a software rasterizer or
 // an e-ink driver.
+//
+// # Panics
+//
+// A Painter is host code and must handle its own panics. The library recovers
+// panics raised by its own layout workers and converts them to render.ErrInternal
+// (releasing the worker's concurrency token there), but it does not wrap calls
+// into a Painter: a panic that escapes a Painter method propagates to the caller
+// of Page.Draw or Tile.Draw. That includes the Save and Restore calls, so a
+// panicking Painter can leave its own state (and its Save/Restore balance)
+// inconsistent. Draw is pure replay of an immutable display list, so the library
+// has no layout state to repair, but it cannot guarantee anything about the
+// host's.
 package paint
 
 // Point is a position in device pixels.
@@ -147,10 +159,22 @@ type GlyphRun struct {
 //
 // Methods are called in display-list order. Save/Restore follow the usual
 // stack semantics. Coordinates are in device pixels with the origin at the
-// top-left of the target surface.
+// top-left of the target surface. A Draw call brackets its replay with Save and
+// Restore, so the painter starts and ends at the caller's transform.
 //
 // A Painter is not required to be safe for concurrent use. Callers must use
 // one Painter per goroutine.
+//
+// # Panics
+//
+// A Painter implementation must handle its own panics. The library does not
+// recover a panic raised by a Painter method: it propagates to the goroutine
+// that called Page.Draw or Tile.Draw, and the closing Restore of that Draw is
+// not reached, so the painter's state is left as the panic left it. Recover at
+// the boundary of each method (or of each Draw call) if the host must keep
+// running; the library cannot do it without hiding host bugs. This is separate
+// from the library's own workers, whose panics are recovered and returned as
+// render.ErrInternal with their concurrency tokens released.
 type Painter interface {
 	Save()
 	Restore()

@@ -1,7 +1,5 @@
 package render
 
-import "fmt"
-
 type itemKind uint8
 
 const (
@@ -143,6 +141,9 @@ type inlineToken struct {
 type layoutContext struct {
 	doc  *Document
 	typo Typography
+	// chapter is the ID of the chapter being planned. It is only used to give
+	// the errors raised here a structured chapter context.
+	chapter string
 }
 
 // flattenInline walks an inline subtree and appends its leaf tokens in document
@@ -151,7 +152,7 @@ type layoutContext struct {
 func (lc *layoutContext) flattenInline(nodes []Node, ids []NodeID, parent Style, parentLang string, out *[]inlineToken) error {
 	for _, id := range ids {
 		if id < 0 || int(id) >= len(nodes) {
-			return fmt.Errorf("%w: inline child %d out of range", ErrInvalidDocument, id)
+			return nodeErrorf(ErrInvalidDocument, lc.chapter, id, "inline child out of range")
 		}
 		n := &nodes[id]
 		st := lc.inlineStyle(n, parent)
@@ -179,9 +180,9 @@ func (lc *layoutContext) flattenInline(nodes []Node, ids []NodeID, parent Style,
 				return err
 			}
 		case NodeBlock:
-			return fmt.Errorf("%w: block node %d inside an inline context", ErrInvalidDocument, id)
+			return nodeErrorf(ErrInvalidDocument, lc.chapter, id, "block node inside an inline context")
 		default:
-			return fmt.Errorf("%w: unknown node kind %d", ErrInvalidDocument, n.Kind)
+			return nodeErrorf(ErrInvalidDocument, lc.chapter, id, "unknown node kind %d", n.Kind)
 		}
 	}
 	return nil

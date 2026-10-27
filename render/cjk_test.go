@@ -3,6 +3,7 @@ package render
 import (
 	"context"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -10,19 +11,35 @@ import (
 	"github.com/laix/layx/render/paint"
 )
 
-var cjkCandidates = []string{
-	"/home/laix/.local/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
-	"/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
-	"/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
-	"/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
-	"/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
+// cjkCandidates lists the CJK font files the tests try, in order, when
+// LAYX_CJK_FONT is not set. It deliberately reads only well-known system
+// locations plus the user's own font directory (derived from HOME), so a
+// checkout works on a stranger's machine instead of pointing at the author's
+// filesystem. Set LAYX_CJK_FONT to force one.
+func cjkCandidates() []string {
+	candidates := []string{
+		"/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+		"/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+		"/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
+		"/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
+		"/System/Library/Fonts/PingFang.ttc",
+		"C:/Windows/Fonts/msyh.ttc",
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		user := []string{
+			filepath.Join(home, ".local", "share", "fonts", "noto-cjk", "NotoSansCJK-Regular.ttc"),
+			filepath.Join(home, ".fonts", "noto-cjk", "NotoSansCJK-Regular.ttc"),
+		}
+		candidates = append(user, candidates...)
+	}
+	return candidates
 }
 
 func cjkFace(tb testing.TB) (FontFace, bool) {
 	tb.Helper()
 	path := os.Getenv("LAYX_CJK_FONT")
 	if path == "" {
-		for _, c := range cjkCandidates {
+		for _, c := range cjkCandidates() {
 			if _, err := os.Stat(c); err == nil {
 				path = c
 				break

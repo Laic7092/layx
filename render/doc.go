@@ -14,7 +14,6 @@ package render
 
 import (
 	"errors"
-	"fmt"
 	"strings"
 	"unicode/utf8"
 
@@ -225,8 +224,18 @@ func (d *Document) style(id StyleID) Style {
 }
 
 // DocumentBuilder validates and copies chapters into a Document.
+//
+// The builder rejects input the engine cannot lay out, returning a
+// *DocumentError that wraps ErrInvalidDocument. Both graph shape (cycles,
+// out-of-range ids, style references, anchors) and style values are checked;
+// style floats must be finite, so NaN or an infinity fails the next AddChapter
+// or Build with the offending StyleID instead of reaching layout arithmetic.
 type DocumentBuilder struct {
-	styles   []Style
+	styles []Style
+	// styleErr caches the result of validating the current style table.
+	// SetStyles cannot return an error (it is a fluent setter), so the failure
+	// is deferred to the next AddChapter or Build, which do return one.
+	styleErr error
 	chapters []Chapter
 	meta     Metadata
 	ids      map[string]struct{}
@@ -242,12 +251,17 @@ func NewDocumentBuilder() *DocumentBuilder {
 
 // SetStyles replaces the style table. Style ID 0 is always valid and denotes
 // the zero style; if styles is empty a single zero style is installed.
+//
+// SetStyles does not return an error, so a non-finite float in a style is
+// reported by the next AddChapter or Build as a *DocumentError wrapping
+// ErrInvalidDocument, with the style index in DocumentError.Style.
 func (b *DocumentBuilder) SetStyles(styles []Style) *DocumentBuilder {
 	b.styles = make([]Style, len(styles))
 	copy(b.styles, styles)
 	if len(b.styles) == 0 {
 		b.styles = []Style{{}}
 	}
+	b.styleErr = validateStyles(b.styles)
 	return b
 }
 
@@ -259,11 +273,14 @@ func (b *DocumentBuilder) SetMetadata(m Metadata) *DocumentBuilder {
 
 // AddChapter validates ch and appends a copy. Chapters must have unique IDs.
 func (b *DocumentBuilder) AddChapter(ch Chapter) error {
+	if b.styleErr != nil {
+		return b.styleErr
+	}
 	if err := validateChapter(ch, len(b.styles)); err != nil {
 		return err
 	}
 	if _, exists := b.ids[ch.ID]; exists {
-		return fmt.Errorf("%w: duplicate chapter id %q", ErrInvalidDocument, ch.ID)
+		return chapterErrorf(ErrInvalidDocument, ch.ID, "duplicate chapter id")
 	}
 	cp := cloneChapter(ch)
 	if err := mergeNodeAnchors(&cp); err != nil {
@@ -276,6 +293,9 @@ func (b *DocumentBuilder) AddChapter(ch Chapter) error {
 
 // Build freezes the builder's contents into a Document.
 func (b *DocumentBuilder) Build() (*Document, error) {
+	if b.styleErr != nil {
+		return nil, b.styleErr
+	}
 	styles := append([]Style(nil), b.styles...)
 	if len(styles) == 0 {
 		styles = []Style{{}}
@@ -320,8 +340,8 @@ func mergeNodeAnchors(ch *Chapter) error {
 			ch.Anchors = make(map[AnchorID]NodeID)
 		}
 		if existing, ok := ch.Anchors[id]; ok && existing != NodeID(i) {
-			return fmt.Errorf("%w: chapter %q anchor %d points at both node %d and node %d",
-				ErrInvalidDocument, ch.ID, id, existing, i)
+			return nodeErrorf(ErrInvalidDocument, ch.ID, NodeID(i),
+				"anchor %d is already assigned to node %d", id, existing)
 		}
 		ch.Anchors[id] = NodeID(i)
 	}
@@ -343,13 +363,15 @@ const (
 )
 
 // validateChapter checks graph shape, style references and anchor targets.
-// It is O(nodes) and reports the first problem it finds.
+// It is O(nodes) and reports the first problem it finds. Every failure is a
+// *DocumentError wrapping ErrInvalidDocument; chapter, node and style context
+// is carried in its structured fields, not only in the message.
 func validateChapter(ch Chapter, styleCount int) error {
 	if len(ch.Nodes) == 0 {
-		return fmt.Errorf("%w: chapter %q has no nodes", ErrInvalidDocument, ch.ID)
+		return chapterErrorf(ErrInvalidDocument, ch.ID, "chapter has no nodes")
 	}
 	if ch.Root < 0 || int(ch.Root) >= len(ch.Nodes) {
-		return fmt.Errorf("%w: chapter %q root %d out of range", ErrInvalidDocument, ch.ID, ch.Root)
+		return chapterErrorf(ErrInvalidDocument, ch.ID, "root %d out of range (%d nodes)", ch.Root, len(ch.Nodes))
 	}
 	states := make([]visitState, len(ch.Nodes))
 	depth := make([]int32, len(ch.Nodes))
@@ -366,12 +388,13 @@ func validateChapter(ch Chapter, styleCount int) error {
 		f := &stack[len(stack)-1]
 		n := &ch.Nodes[f.node]
 		if int(n.Style) >= styleCount {
-			return fmt.Errorf("%w: chapter %q node %d style %d out of range", ErrInvalidDocument, ch.ID, f.node, n.Style)
+			return styleErrorf(ErrInvalidDocument, ch.ID, f.node, n.Style,
+				"style out of range (%d styles in document)", styleCount)
 		}
 		switch n.Kind {
 		case NodeBlock, NodeInline:
 			if n.Kind == NodeBlock && len(n.Children) == 0 && n.Text != "" {
-				return fmt.Errorf("%w: chapter %q node %d is a block with text; use a child text node", ErrInvalidDocument, ch.ID, f.node)
+				return nodeErrorf(ErrInvalidDocument, ch.ID, f.node, "block has text; use a child text node")
 			}
 			if f.child >= len(n.Children) {
 				states[f.node] = visited
@@ -381,34 +404,34 @@ func validateChapter(ch Chapter, styleCount int) error {
 			child := n.Children[f.child]
 			f.child++
 			if child < 0 || int(child) >= len(ch.Nodes) {
-				return fmt.Errorf("%w: chapter %q node %d child %d out of range", ErrInvalidDocument, ch.ID, f.node, child)
+				return nodeErrorf(ErrInvalidDocument, ch.ID, f.node, "child %d out of range", child)
 			}
 			if n.Kind == NodeInline && ch.Nodes[child].Kind == NodeBlock {
-				return fmt.Errorf("%w: chapter %q node %d puts a block inside an inline", ErrInvalidDocument, ch.ID, child)
+				return nodeErrorf(ErrInvalidDocument, ch.ID, child, "block node inside an inline container")
 			}
 			switch states[child] {
 			case visiting:
-				return fmt.Errorf("%w: chapter %q contains a cycle at node %d", ErrInvalidDocument, ch.ID, child)
+				return nodeErrorf(ErrInvalidDocument, ch.ID, child, "node graph contains a cycle")
 			case visited:
 				// Shared subtrees are allowed by the arena representation, but
 				// they have a single layout position. Rejecting them keeps the
 				// tree semantics unambiguous.
-				return fmt.Errorf("%w: chapter %q node %d is referenced more than once", ErrInvalidDocument, ch.ID, child)
+				return nodeErrorf(ErrInvalidDocument, ch.ID, child, "node is referenced more than once")
 			}
 			if depth[f.node]+1 > maxBuilderDepth {
-				return fmt.Errorf("%w: chapter %q exceeds max depth", ErrInvalidDocument, ch.ID)
+				return chapterErrorf(ErrInvalidDocument, ch.ID, "node depth exceeds %d", maxBuilderDepth)
 			}
 			depth[child] = depth[f.node] + 1
 			states[child] = visiting
 			stack = append(stack, frame{node: child})
 		case NodeText, NodeImage, NodeBreak:
 			if len(n.Children) != 0 {
-				return fmt.Errorf("%w: chapter %q leaf node %d has children", ErrInvalidDocument, ch.ID, f.node)
+				return nodeErrorf(ErrInvalidDocument, ch.ID, f.node, "leaf node has children")
 			}
 			states[f.node] = visited
 			stack = stack[:len(stack)-1]
 		default:
-			return fmt.Errorf("%w: chapter %q node %d has unknown kind %d", ErrInvalidDocument, ch.ID, f.node, n.Kind)
+			return nodeErrorf(ErrInvalidDocument, ch.ID, f.node, "unknown node kind %d", n.Kind)
 		}
 	}
 
@@ -417,20 +440,21 @@ func validateChapter(ch Chapter, styleCount int) error {
 			// Unreachable nodes are almost always a compiler bug. Allow them
 			// only if they are structurally valid; they do not affect layout.
 			if int(ch.Nodes[i].Style) >= styleCount {
-				return fmt.Errorf("%w: chapter %q node %d style %d out of range", ErrInvalidDocument, ch.ID, i, ch.Nodes[i].Style)
+				return styleErrorf(ErrInvalidDocument, ch.ID, NodeID(i), ch.Nodes[i].Style,
+					"style out of range (%d styles in document)", styleCount)
 			}
 		}
 	}
 	root := ch.Nodes[ch.Root]
 	if root.Kind == NodeText || root.Kind == NodeImage || root.Kind == NodeBreak {
-		return fmt.Errorf("%w: chapter %q root must be a container", ErrInvalidDocument, ch.ID)
+		return nodeErrorf(ErrInvalidDocument, ch.ID, ch.Root, "root must be a container")
 	}
 	for id, node := range ch.Anchors {
 		if id == NoAnchor {
-			return fmt.Errorf("%w: chapter %q uses anchor 0", ErrInvalidDocument, ch.ID)
+			return chapterErrorf(ErrInvalidDocument, ch.ID, "anchor 0 is not allowed")
 		}
 		if node < 0 || int(node) >= len(ch.Nodes) {
-			return fmt.Errorf("%w: chapter %q anchor %d points at node %d", ErrInvalidDocument, ch.ID, id, node)
+			return chapterErrorf(ErrInvalidDocument, ch.ID, "anchor %d points at node %d out of range", id, node)
 		}
 	}
 	return nil

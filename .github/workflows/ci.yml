@@ -1,0 +1,214 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# Workspace mode rejects -mod=mod and this repository must never rewrite its
+# module files in CI, so force readonly mode everywhere.
+env:
+  GOFLAGS: -mod=readonly
+
+jobs:
+  fmt:
+    name: gofmt
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.x'
+          cache: true
+      - name: gofmt
+        run: |
+          unformatted=$(git ls-files --cached --others --exclude-standard -z -- '*.go' | xargs -0 gofmt -l)
+          if [ -n "$unformatted" ]; then
+            echo "The following files are not gofmt'd:" >&2
+            echo "$unformatted" >&2
+            exit 1
+          fi
+
+  vet:
+    name: go vet
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.x'
+          cache: true
+      - name: go vet (root module)
+        run: go vet ./...
+      - name: go vet (epub module)
+        run: cd epub && go vet ./...
+
+  test-linux:
+    name: go test -race (linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.x'
+          cache: true
+      - name: go test -race (root module)
+        run: go test -race -count=1 ./...
+      - name: go test -race (epub module)
+        run: cd epub && go test -race -count=1 ./...
+
+  test-os:
+    name: tests on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.x'
+          cache: true
+      - name: go test (root module)
+        run: go test -count=1 ./...
+      - name: go test (epub module)
+        run: cd epub && go test -count=1 ./...
+
+  cross-build:
+    name: cross-build ${{ matrix.goos }}/${{ matrix.goarch }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: linux
+            goarch: '386'
+          - goos: linux
+            goarch: arm64
+          - goos: windows
+            goarch: amd64
+          - goos: darwin
+            goarch: arm64
+          - goos: js
+            goarch: wasm
+          - goos: freebsd
+            goarch: amd64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.x'
+          cache: true
+      - name: build root module
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: '0'
+        run: go build ./...
+
+  coverage:
+    name: render coverage
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.x'
+          cache: true
+      - name: render statement coverage (gate 85%)
+        run: |
+          go test ./render -count=1 -coverprofile=coverage.out -covermode=count
+          go tool cover -func=coverage.out | tail -n 1
+          total=$(go tool cover -func=coverage.out | awk '/^total:/ { sub(/%/, "", $3); print $3 }')
+          echo "render statement coverage: ${total}% (gate: 85%)"
+          if awk -v total="$total" 'BEGIN { exit !(total + 0 < 85) }'; then
+            echo "coverage gate failed: ${total}% < 85%" >&2
+            exit 1
+          fi
+
+  fuzz:
+    name: fuzz smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.x'
+          cache: true
+      - name: short fuzz runs (30s per target)
+        run: |
+          run_fuzz() { # dir package target
+            dir=$1 pkg=$2 target=$3
+            if (cd "$dir" && go test "$pkg" -list "^${target}$" | grep -qxF "$target"); then
+              echo "fuzzing $target (30s)"
+              (cd "$dir" && go test "$pkg" -run '^$' -fuzz "^${target}$" -fuzztime 30s)
+            else
+              echo "::notice title=Fuzz target not found::$target is not in $dir ($pkg); skipping"
+            fi
+          }
+          run_fuzz . ./render FuzzLayoutText
+          run_fuzz epub ./ FuzzConvertChapter
+          run_fuzz epub ./ FuzzParseCSS
+          run_fuzz epub ./ FuzzParseNCX
+
+  bench:
+    name: benchmark regression gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      # Hosted runners are slower than the reference machine the baseline was
+      # captured on, so the CI band is wider than the local default (1.5x).
+      BENCH_TOL: '2.0'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.x'
+          cache: true
+      - name: install a CJK font for the layout benchmarks
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq fonts-wqy-microhei ||
+            echo "::warning title=Font install failed::layout benchmarks will be skipped"
+      - name: benchmark regression gate
+        run: scripts/benchgate.sh
+
+  go-min:
+    name: minimum Go (root module, 1.21)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      # The epub module needs a newer toolchain; the root module's declared
+      # minimum is checked in plain module mode.
+      GOWORK: 'off'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.21.x'
+          cache: true
+      - run: go version
+      - name: go build (root module, Go 1.21)
+        run: go build ./...
+      - name: go vet (root module, Go 1.21)
+        run: go vet ./...
+      - name: go test (root module, Go 1.21)
+        run: go test -count=1 ./...

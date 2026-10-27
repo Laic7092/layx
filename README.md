@@ -1,5 +1,11 @@
 # layx
 
+[![CI](https://github.com/Laic7092/layx/actions/workflows/ci.yml/badge.svg)](https://github.com/Laic7092/layx/actions/workflows/ci.yml)
+[![Go Reference](https://pkg.go.dev/badge/github.com/laix/layx/render.svg)](https://pkg.go.dev/github.com/laix/layx/render)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
+**中文** · [English](README.en.md)
+
 纯 Go 的 reflowable 排版内核，输出显示列表。输入是宿主已经解析、级联好的 `render.Document`，
 输出是分页结果、`DisplayList` 和命中/选区/锚点映射。**不解析 EPUB/XHTML/CSS，不内置光栅器。**
 
@@ -20,6 +26,29 @@ XHTML / 选择器 / 级联                ↓
 设计取舍见 [`docs/design.md`](docs/design.md)；标点/断行政策、默认值的规范出处、
 中文正文的推荐开关组见 [`docs/text-rules.md`](docs/text-rules.md)。
 
+## 安装
+
+两个 module 独立发布，按需 `go get`：
+
+```sh
+go get github.com/laix/layx/render@v0.1.0    # 排版内核（必需）
+go get github.com/laix/layx/epub@v0.1.0      # EPUB/XHTML/CSS 解析层（可选）
+```
+
+`epub` 是 nested module，tag 形如 `epub/v0.x.y`；它 `require` 根 module 的**已发布版本**，
+没有 `replace`，外部消费者可以直接 `go get`。两个 module 一起打版本，升级时一起升。
+
+最低 Go 版本：根 module **Go 1.21**（`render` 实际用到的语法/API 的下限），`epub`
+module **Go 1.26**（`golang.org/x/net` 的要求）。仓库提交了 `go.work` 列出两个 module，
+克隆后一条 Go 1.26+ 工具链即可开发：
+
+```sh
+go test ./...              # 根 module（workspace 模式）
+(cd epub && go test ./...) # epub module
+```
+
+外部消费者看不到 `go.work`，解析的是上面两个已发布的 module 版本。
+
 ## 包结构
 
 ```text
@@ -29,8 +58,11 @@ github.com/laix/layx/render/hyphen/en  可选：TeX 英文断字模式，核心�
 github.com/laix/layx/epub              EPUB/XHTML/CSS → render.Document（nested module）
 examples/layout                        最小示例：排版并打印页数
 examples/wasm                          wasm + Canvas 2D 原型（含 bench 路径）
-tools/{bench_native,memreport,snapshotimg,corpora}  开发工具，不属于库
+tools/{bench_native,memreport,snapshotimg,genepub}  开发工具，不属于库
 ```
+
+API 参考见 [`docs/api.md`](docs/api.md)：越界与空结果的统一语义、`IssueCode` 表、
+`Limits` 默认值、错误分类、`FontSet` 覆盖查询与 `LayoutRange` 语义。
 
 `epub/` 有自己的 `go.mod` 和 [`epub/README.md`](epub/README.md)，不在根 `go test ./...` 里。
 直接依赖只有 `go-text/typesetting`（shaping / UAX #14 断行）与 `golang.org/x/image/math/fixed`；
@@ -99,7 +131,7 @@ doc, err := b.Build()
 
 ```go
 layout.PageCount()
-page := layout.Page(i) // 首次构建，之后按 Options.PageCache（默认 4）做 LRU
+page := layout.Page(i) // 越界为 nil；首次构建，之后按 Options.PageCache（默认 4）做 LRU
 page.Draw(painter)
 page.HitTest(pt)
 page.Links()
@@ -111,7 +143,7 @@ page.Links()
 render.LayoutOptions{Mode: render.ModeScroll, TileHeight: 1024} // 0 = Viewport.Height
 layout.ContentHeight()
 layout.TileCount()
-tile := layout.Tile(i) // 首次构建，之后按 Options.TileCache（默认 8）做 LRU
+tile := layout.Tile(i) // 越界为 nil；首次构建，之后按 Options.TileCache（默认 8）做 LRU
 layout.Tiles(lo, hi)   // 并行构建一段 tile（tile 之间独立，用满并发预算）
 layout.Prefetch(ctx, lo, hi)                     // 分页=页、滚动=tile，同步并行
 pf := layout.StartPrefetch(ctx, lo, hi)          // 同上，但跑在显式句柄的 goroutine 上
@@ -160,9 +192,12 @@ inline 分词、建块树，不做 shaping），再把全书段落汇成一个�
 - `Locate(anchor)` → `Location`（只到节点，`Offset` 为 0），`PageOf(loc)` ↔
   `LocationOfPage(page)`；`PageRange(chapter)` → `[first, first+count)`，
   `ChapterPages()` 给出每章首页。滚动模式没有页，后用 `ChapterContentTop(chapter)`。
-- 命中与选区：`Page.HitTest`、`Layout.HitTest`、`Layout.Selection(from, to)` 返回同一套
-  `Location` / 矩形。`SelectionQuad` 带两套坐标：`Rect` 是页内坐标（仅分页模式），
-  `Content` 是内容坐标（两种模式都有；滚动模式减 `Tile.Top()` 得 tile 内坐标）。
+- 命中与选区：`Page.HitTest(pt)` 收**页内坐标**（含页边距），`Layout.HitTest(pt)` 在分页与
+  滚动模式下都收**内容坐标**（x 不含 `Margins.Left`，y 是全书正文坐标）；两者都返回同一套
+  `Location`。`Layout.Selection(from, to)` 返回矩形；没有可命中的内容（空章节/空布局）时
+  返回 `(Location{}, false)`，不 panic。`SelectionQuad` 带两套坐标：
+  `Rect` 是页内坐标（仅分页模式），`Content` 是内容坐标（两种模式都有；滚动模式减 `Tile.Top()`
+  得 tile 内坐标）。无法解析的 `Location` 返回空切片。
 - `LocationAt(y)` ↔ `OffsetOf(loc)` 在两种模式下共用一套内容坐标，互为逆运算。
   `Progress(loc)` ∈ [0,1]：分页按「页 + 页内偏移」，滚动按 `y / ContentHeight`；两者
   分母不同，同一位置的百分比会有小差异，**不要持久化百分比**。
@@ -170,6 +205,125 @@ inline 分词、建块树，不做 shaping），再把全书段落汇成一个�
   节点为零宽 run），搜索和复制不必自己遍历 `NodeText`；它不插段落分隔符。
 - `Layout.Document()` 的指针身份可判断索引/图片缓存是否过期；`Margins()` /
   `PageContentHeight()` 让宿主不必反推页边距和页内容高。
+
+## 越界与空结果
+
+统一原则：**查不到就返回 `(T, false)` 或 `nil`，不 panic、不返回半成品。** 返回 `bool` 的
+调用失败时返回值类型零值；返回指针的返回 `nil`；返回切片的返回 `nil` 或长度为 0 的切片
+（都能直接 `range`）。完整表见 [`docs/api.md`](docs/api.md)。
+
+| 调用 | 语义 |
+|---|---|
+| `Document.Chapter(i)` | `(Chapter, bool)`：越界 `false` |
+| `Document.Text(chapter)` | `(string, []TextRun, bool)`：越界 `false` |
+| `Layout.Page(n)` | 越界 / 分页模式不可用时 `nil`（滚动模式恒 `nil`） |
+| `Layout.Tile(i)` | 越界 / 分页模式时 `nil` |
+| `Layout.Tiles(lo, hi)` | 区间夹到 `[0, TileCount)`；空区间返回 `nil` |
+| `Layout.Locate(anchor)` | 未知锚点 `(Location{}, false)` |
+| `Layout.PageOf(loc)` / `LocationOfPage(page)` | 解析不到 `(0, false)` / `(Location{}, false)` |
+| `Layout.LocationAt(y)` / `OffsetOf(loc)` / `Progress(loc)` | 解析不到 `(0, false)` |
+| `Layout.PageRange(chapter)` / `ChapterContentTop(chapter)` | 越界 `(0, 0, false)` 或 `(0, false)` |
+| `Layout.ChapterPages()` | 每**文档章**一项：该章首页；不在本次布局内（按章排版范围外）为 `-1`；滚动模式为 `nil` |
+| `Layout.HitTest(pt)` / `Page.HitTest(pt)` | 没有可命中的内容（空章节/空布局）时 `(Location{}, false)` |
+| `Layout.Selection(from, to)` | 任一端无法解析：`nil`（空选区） |
+| `Layout.Issues()` | 无诊断时长度为 0 的切片（可安全 `range`；`nil` 与空切片等价） |
+| `Layout.Document()` | 总是非 `nil`；`PageCount` / `TileCount` / `ContentHeight` 总是有值（另一模式为 0） |
+| `Book.ResolveLink(url)` | 外部 URL / 断链 `(LinkTarget{}, false)` |
+
+`Page(n)` / `Tile(i)` 返回 `nil` 是唯一需要"先判空再解引用"的约定，其余查询都用 `bool`。
+
+## 诊断与错误
+
+库不再静默降级：**它决定丢弃或替换的东西都会报告出来**，诊断不改变布局结果。
+
+```go
+eng, _ := render.New(render.Options{
+    // 在 Layout 返回前、所有 worker 结束后，于调用方 goroutine 上逐条回调。
+    OnIssue: func(is render.Issue) { log.Printf("layout: %s", is) },
+})
+layout, err := eng.Layout(ctx, doc, opts)
+if err != nil {
+    return err
+}
+for _, is := range layout.Issues() { // 事后取：同一次调用的完整列表（副本）
+    log.Printf("%s chapter=%q node=%d %s", is.Code, is.Chapter, is.Node, is.Detail)
+}
+```
+
+| `IssueCode` | 含义 |
+|---|---|
+| `IssueMissingFont` | 请求的 `FontFamily` 在 `FontSet` 里没有 face，文字用回退 face 排了 |
+| `IssueMissingGlyphs` | 配置的字体都画不出这些 rune（tofu）；`Detail` 最多列 8 个码点加数量 |
+| `IssueDroppedContent` | IR 表达不了或缺数据而丢弃的内容（如没有字节的图片）；`epub` 层的表格线性化、丢图、ruby 也用它 |
+| `IssueSuppressed` | 列表被截断时的汇总项，`Detail` 是未保留的条数（单次上限 1024 条） |
+
+`epub.Options.OnIssue func(render.Issue)` 与 `Book.Issues()` 复用同一套 `IssueCode` 和投递语义，
+报告 EPUB → IR 转换里被线性化/丢弃/忽略的内容（表格、图片、ruby、`@font-face` 等）。
+宿主也可以先查字体覆盖，把 tofu 挡在排版之前：
+
+```go
+fonts.HasFamily("serif")                         // 字体族是否存在
+fonts.Coverage('好')                              // 是否有任一 face 能画出它
+face, ok := fonts.Resolve(render.Style{FontFamily: "serif"}, '好') // 排版实际会选的 face
+```
+
+**错误**：每个错误都 wrap 六个哨兵之一——`ErrInvalidDocument`、`ErrInvalidOptions`、
+`ErrNoFonts`、`ErrLimitExceeded`、`ErrClosed`、`ErrInternal`——所以 `errors.Is` 可用；
+需要定位时用 `errors.As` 取 `*render.DocumentError`：
+
+```go
+var de *render.DocumentError
+if errors.As(err, &de) {
+    log.Printf("kind=%v chapter=%q node=%d style=%d detail=%s",
+        de.Kind, de.Chapter, de.Node, de.Style, de.Detail)
+}
+```
+
+- **panic 契约**：库保证**任何输入都以 `error` 结束，不让宿主进程崩溃**。worker 里的 panic 会被
+  恢复成 wrap `ErrInternal` 的错误——它表示**库的 bug**，不是文档非法。`Page.Draw` /
+  `Tile.Draw` 里宿主 `Painter` 的 panic 库不恢复：Painter 必须在自己的边界处理。
+- **NaN/±Inf 拒绝**：`LayoutOptions` 的视口、边距、`TileHeight`、`Typography` 数值与
+  `DocumentBuilder` 里每个 `Style` 的数值都检查有限性；非有限值返回 `ErrInvalidOptions`
+  （样式在 `Build` 时报 `ErrInvalidDocument` 并带 style 上下文），不会流进几何或页数。
+
+### 资源上限
+
+`Limits` 是**单次布局的硬上限**：超限返回 `ErrLimitExceeded` 并带实测值与上限，而不是分配
+到 OOM。零值等于默认值，`Layout`、`Relayout`、按章排版都生效，缓存命中也绕不过去。
+
+| 字段 | 默认 | 限制对象 |
+|---|---|---|
+| `MaxNodes` | 1 048 576 | 单次布局遍历的 node 数 |
+| `MaxDepth` | 256 | 章节树深度 |
+| `MaxTextRunes` | 20 000 000 | 文本 rune 数 |
+| `MaxImagePixels` | 67 108 864 | 图片像素总数 |
+| `MaxPages` | 100 000 | 分页模式页数 |
+| `MaxTiles` | 100 000 | 滚动模式 tile 数（内容高 / `TileHeight`） |
+| `MaxLines` | 2 000 000 | 行盒总数 |
+
+`MinTileHeight = 16`：非零 `TileHeight` 低于它返回 `ErrInvalidOptions`（否则多 1 像素内容就多
+一个 tile）。确有大文档需求时宿主可以显式调高上限，但内存由宿主承担；超大工具书优先用按章排版。
+
+### 按章排版
+
+```go
+layout, err := eng.LayoutRange(ctx, doc, opts, 10, 20) // 半开区间 [10, 20)
+// 等价于 opts.Range = &render.ChapterRange{First: 10, Last: 20} 后调用 Layout
+```
+
+- 只排范围内的章；范围外不产生页/行，`Locate` / `PageOf` / `LocationOfPage` / `OffsetOf` /
+  `LocationAt` 等永远解析不到范围外，返回 `false`；`ChapterPages()` 对范围外的章给 `-1`。
+- 页号从范围内第 0 页开始；`Location.Chapter` 仍是**文档章号**，不是范围内偏移。
+- 滚动模式内容坐标以范围内第一章顶端为 0；`Relayout` 保持同一范围；`Document()` 仍返回完整文档。
+- 越界、`First >= Last`（空范围/反向范围）返回 `ErrInvalidOptions`；`Range == nil` 表示整本。
+
+### 单次统计
+
+`render.Options{Measure: true}` 下，`(*Layout).Stats()` 给出**这一次调用**的分阶段数据：
+`Total`、`Keys`、`Break`、`Stack`、`Paginate`、`Assemble`、`Shapes`、`Tasks`、`Pages`、`Tiles`。
+`Measure` 关闭时时长为 0，`Shapes`/`Tasks`/`Pages`/`Tiles` 等计数仍然准确（不读时钟）。
+`Stack`/`Paginate` 的时长是跨 worker 段之和，并行时可能大于墙钟；相位归因用 `Total` 对齐。
+`Engine.Stats()` 仍是整个 Engine 的累计值，两者互不污染。
 
 ## 重排与缓存
 
@@ -193,7 +347,8 @@ shaped 行，命中不增加 `Engine.shapes`。
 `render.Options{Measure: true}` 打开计时，`Engine.Stats()` 返回累计墙钟：`Total`、
 `Keys`、`Break`、`Stack`、`Paginate`、`Assemble`，以及独立累计的 `Display`；`Measure`
 关闭时布局路径不读时钟。`Tasks`、`Shapes`、`Pages`、`Tiles` 始终计数，`Busy` /
-`Imbalance` 只在 `Measure` 打开时统计。
+`Imbalance` 只在 `Measure` 打开时统计。`Engine.Stats()` 是 Engine 生命周期内的累计值，
+适合做调试面板；要把一次慢布局归因到具体调用，用上一节的 `Layout.Stats()`。
 
 ## 性能
 
@@ -203,7 +358,9 @@ shaped 行，命中不增加 `Engine.shapes`。
 - **行高重排快 22×**：1.1 vs 24.3 ms。`LineHeight` 不在 `BreakKey` 里，一次 shaping 都不做。
 - **分段不做 bidi**：纯 LTR 文本自己按 script+face 切分（`render/segment.go`），复杂脚本与
   双向控制符回落 go-text 的 `Segmenter`。中文段落上这一步从 39.7 B/rune 的分配降到 0，
-  10 MB 文本每次布局少分配约 120 MB。
+  10 MB 文本每次布局少分配约 120 MB。回落路径现在先按 bidi 段落分隔符（LF/CR/U+2029 等）
+  切分再逐段调用 `Segmenter.Split`，并保证 shaped runs 覆盖整段，所以**同一段文本里既有换行
+  又有阿拉伯/希伯来/天城文/泰文时也能正常排版**（此前会 panic）。
 - **布局内存 3.9 B/rune**（500 万字 = 18 MB，改动前 13.2 B/rune / 64 MB）。段落不保留
   `[]rune` 拷贝，行盒 20 B（`start`/`x`/`avail`/`last`/`align` 由样式推导），flow 只存
   每项 4 B 的 y 与 4 B 的 unit 下标，`flowItem` 按需物化。
@@ -255,10 +412,28 @@ go run ./tools/memreport -chars 3300000 -live-profile /tmp/live.pprof   # 存活
 
 ## 验证
 
+CI（[`.github/workflows/ci.yml`](.github/workflows/ci.yml)）在 Linux、macOS、Windows 上跑
+`gofmt`、`go vet`、单测与 `-race`，并做交叉编译矩阵（`linux/386`、`linux/arm64`、
+`windows/amd64`、`darwin/arm64`、`js/wasm`、`freebsd/amd64`）、覆盖率门、短时 fuzz
+（`FuzzLayoutText`、`FuzzConvertChapter`、`FuzzParseCSS`）、benchmark 回归门，以及
+`go-min` job（Go 1.21 + `GOWORK=off` 验证根 module 的最低版本承诺）。
+本地跑同一套检查：
+
+```sh
+./scripts/check.sh          # gofmt / vet / 单测 / 交叉编译
+./scripts/check.sh --fuzz   # 再加短时 fuzz 冒烟（FUZZTIME=15s）
+```
+
+单独跑：
+
 ```sh
 go test ./... -count=1
 go test ./render -race -count=1
 go vet ./...
+(cd epub && go test ./... -count=1)
+go test ./render -run '^$' -fuzz FuzzLayoutText -fuzztime 30s
+(cd epub && go test -run '^$' -fuzz FuzzConvertChapter -fuzztime 30s)
+./scripts/benchgate.sh    # 与 scripts/bench_baseline.txt 比较；-update 重录
 ```
 
 `render/mem_test.go` 是内存闸门：它断言 100 万字文档的布局不超过 6 B/rune（当前约 3.9），
@@ -278,8 +453,12 @@ go vet ./...
 
 - 未实现：表格、ruby、竖排、脚注、flex/grid、RTL 视觉序、浮动环绕、`keep-with-next`。
   表格与脚注只需新样式和分页规则；flex/grid、竖排、ruby 需要新的布局模型。
-- **不提供诊断输出**：IR 表达不了的内容不会被报告，宿主构建 `Document` 时自行记录并
-  决定降级策略。fixed-layout / 脚本化内容同理，处置是宿主的事。
+- 未实现项不再"静默"：`epub` 层会以 `IssueDroppedContent` 报告被线性化的表格、被丢的
+  图片/SVG、被忽略的 ruby 与 CSS at-rule；`render` 层报告自己丢弃的内容（如缺字节的图片）。
+  IR 表达不了的能力（表格、flex/grid、竖排、ruby）仍然没有布局模型，宿主拿到诊断后自行
+  降级；fixed-layout / 脚本化内容同理，处置是宿主的事。
+- 诊断是"我们丢掉了什么"的出口，不是能力：`IssueMissingGlyphs` 只告诉你字体覆盖不到，
+  fallback 字体仍由宿主挑选并通过 `FontSet` 提供。
 - `Style` 的零值是"继承"，所以 `FirstLineIndent: 0`、`LetterSpacing: 0`、
   `Hyphenate: false` 这类"显式取消继承"无法表达；请按已级联的样式构建。
 - 锚点是节点级、不是 rune 级；跨书版本的稳定性由宿主的 `AnchorID` 保证。
@@ -291,13 +470,25 @@ go vet ./...
 - `Layout` 常驻整本书的行盒与 flow，约 4 B/字：一百万字的书约 4 MB。剩下的大头不在
   布局里，而在 `Document`（原文）与 `FontSet`（字体字节 + go-text 解析出的 glyf 表，
   一套中文字体约 20 MB，**每个 Engine 共享一份，不要按书或按字号重建**）。
+- `Limits` 的默认值面向"单本电子书"：超过默认上限的书会以 `ErrLimitExceeded` 失败，而不是
+  慢慢吃内存。超大工具书/网络连载请用 `LayoutRange` 按章排版，确需整本时再显式调高上限。
 - 峰值 RSS 主要由单次布局的分配 churn 决定（Go 的 GC 让堆长到存活集的 2 倍左右），
   churn 里约一半是 go-text 的 shaping 与 bidi 之外无法再省的部分。宿主若在 Windows 上
   看到远大于此的数字，先确认没有按字号重建 `FontSet`、没有把 `TileHeight` 设成整本书
   高度（一个 tile 的显示列表就是全书字形），再用 `tools/memreport` 对齐量一次。
 - `examples/wasm` 的 demo 在改字号/行高时仍走冷布局；benchmark 路径已走 `Relayout`。
 
+## 更多文档
+
+- [English README](README.en.md) — 同一份入口的英文版
+- [`docs/api.md`](docs/api.md) — API 参考：越界语义、`IssueCode`、`Limits`、错误分类、`LayoutRange`
+- [`docs/design.md`](docs/design.md) — 设计取舍与不变量
+- [`docs/text-rules.md`](docs/text-rules.md) — 排版政策、默认值出处与中文推荐开关
+- [`epub/README.md`](epub/README.md) — EPUB 解析层
+- [`CONTRIBUTING.md`](CONTRIBUTING.md) · [`CHANGELOG.md`](CHANGELOG.md) · [`SECURITY.md`](SECURITY.md)
+
 ## 许可
 
-测试字体 `render/testdata/DejaVuSerif.ttf` 使用 DejaVu 许可，见
-`render/testdata/DejaVu-LICENSE.txt`。
+本库以 **MIT** 许可发布，见 [`LICENSE`](LICENSE)。测试字体
+`render/testdata/DejaVuSerif.ttf` 使用 DejaVu（Bitstream Vera 派生）许可，单独见
+`render/testdata/DejaVu-LICENSE.txt`；再分发字体字节时请保留该文件。

@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"sort"
 	"sync"
-	"time"
 	"unicode/utf8"
 
 	"github.com/go-text/typesetting/language"
@@ -53,7 +52,7 @@ type SelectionQuad struct {
 	// scroll-mode host can use: the tile-local rectangle is Content shifted by
 	// -Tile.Top(). In paged mode Content.X equals Rect.X and Content.Y is the
 	// page slot top plus the in-page offset, i.e. the OffsetOf of the same
-	// location. Note that Layout.HitTest takes x without the left margin, so
+	// location. Note that Layout.HitTest's Point excludes the left margin, so
 	// feed it Content.X - Margins.Left.
 	Content paint.Rect
 }
@@ -176,6 +175,18 @@ type Layout struct {
 	// by Options.LineCache.
 	lineCache *lineCache
 
+	// issues are the diagnostics reported by the call that produced this
+	// Layout. They are frozen after the call: Options.OnIssue has already been
+	// replayed, so Issues is the only consumer.
+	issues []Issue
+	// stats is the phase attribution of the call that produced this Layout.
+	stats LayoutStats
+	// firstChapter and lastChapter are the half-open range of document chapter
+	// indexes this layout covers. A full-document layout covers
+	// [0, len(doc.chapters)). Chapters outside the range have a zero-valued
+	// chapterFlow and never resolve through any accessor.
+	firstChapter, lastChapter int
+
 	// Scroll-mode fields. chapterTop[i] is the content y of chapter i;
 	// contentHeight is the end of the last chapter's flow.
 	chapterTop    []float32
@@ -191,29 +202,98 @@ type Layout struct {
 	cacheOrder []int
 }
 
+// Issues returns the diagnostics reported by the call that produced this
+// Layout, in the order they were first reported. The result is a copy, and it
+// is the same list that Options.OnIssue received: later layouts do not change
+// it.
+func (l *Layout) Issues() []Issue {
+	out := make([]Issue, len(l.issues))
+	copy(out, l.issues)
+	return out
+}
+
+// ChapterRange is a half-open range of document chapter indexes, [First, Last).
+//
+// It is what LayoutOptions.Range carries to lay out only part of a document:
+// First is included, Last is excluded. A zero value is the empty range, not the
+// whole document; leaving LayoutOptions.Range nil means the whole document.
+type ChapterRange struct{ First, Last int }
+
 // Layout computes a new layout variant for doc.
 func (e *Engine) Layout(ctx context.Context, doc *Document, opts LayoutOptions) (*Layout, error) {
 	return e.layoutDoc(ctx, doc, opts, nil)
 }
 
-// layoutDoc implements Layout and Relayout. A non-nil variants cache carries
-// break and page results across Relayout calls for the same document.
-func (e *Engine) layoutDoc(ctx context.Context, doc *Document, opts LayoutOptions, variants *variantCache) (*Layout, error) {
+// LayoutRange is Layout restricted to the document chapters [first, last).
+//
+// It is a convenience for LayoutOptions.Range: a ranged layout lays out (and
+// shapes) only the included chapters, numbers its pages from 0 for the range
+// and reports Location.Chapter as the document's chapter index. Excluded
+// chapters never resolve through Locate, PageOf, LocationOfPage, LocationAt,
+// OffsetOf, PageRange or ChapterContentTop.
+//
+// The document itself is unchanged, and Layout.Document still returns all of
+// it, so a host can swap ranges without rebuilding the IR. Relayout keeps the
+// range unless the new options name another one.
+func (e *Engine) LayoutRange(ctx context.Context, doc *Document, opts LayoutOptions, first, last int) (*Layout, error) {
+	opts.Range = &ChapterRange{First: first, Last: last}
+	return e.layoutDoc(ctx, doc, opts, nil)
+}
+
+// layoutDoc implements Layout, LayoutRange and Relayout. A non-nil variants
+// cache carries break and page results across Relayout calls for the same
+// document.
+//
+// The named result and its deferred recoverInto are what keep the panic
+// contract: a panic on the caller's goroutine becomes an ErrInternal error
+// instead of crashing the host. A panic on a helper goroutine is recovered by
+// parallelFor, which returns it here.
+func (e *Engine) layoutDoc(ctx context.Context, doc *Document, opts LayoutOptions, variants *variantCache) (out *Layout, err error) {
+	defer recoverInto(&err)
 	if doc == nil {
-		return nil, fmt.Errorf("%w: nil document", ErrInvalidDocument)
+		return nil, docErrorf(ErrInvalidDocument, "nil document")
 	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	opts, err := opts.validate()
+	opts, err = opts.validate()
 	if err != nil {
 		return nil, err
 	}
+	nch := len(doc.chapters)
+	firstChapter, lastChapter := 0, nch
+	if r := opts.Range; r != nil {
+		// An empty or backwards range is a host bug: it would produce a layout
+		// with no chapters, which none of the accessors are useful for. Reject
+		// it together with out-of-document values rather than returning a
+		// layout that resolves nothing.
+		if r.First < 0 || r.Last <= r.First || r.Last > nch {
+			return nil, docErrorf(ErrInvalidOptions,
+				"chapter range [%d,%d) is not a non-empty range inside the document's %d chapters", r.First, r.Last, nch)
+		}
+		firstChapter, lastChapter = r.First, r.Last
+	}
+	rangeChapters := lastChapter - firstChapter
+	sink := newIssueSink(e.onIssue)
+	run := &layoutRun{}
+	totalStart := e.mark()
+	defer func() {
+		// Flush exactly once per call, including error paths. The callback is
+		// replayed here, on the caller's goroutine, after every worker joined.
+		issues := sink.flush()
+		// The break phase counts shaping into run.shapes so that one call's
+		// Stats is not polluted by concurrent layouts; fold the total back so
+		// Engine.Stats.Shapes keeps its cumulative meaning.
+		e.shapes.Add(run.shapes.Load())
+		if out != nil {
+			out.issues = issues
+			out.stats = run.stats(out, e.elapsed(totalStart))
+		}
+	}()
 	if e.measure {
 		e.stats.layouts.Add(1)
-		defer e.stop(time.Now(), &e.stats.total)
+		defer e.stop(totalStart, &e.stats.total)
 	}
-	nch := len(doc.chapters)
 	if variants == nil {
 		variants = newVariantCache(nch)
 	}
@@ -239,16 +319,21 @@ func (e *Engine) layoutDoc(ctx context.Context, doc *Document, opts LayoutOption
 	breakKeys := make([]keyHash, nch)
 	pageKeys := make([]keyHash, nch)
 	seedA, seedB := variants.seeds()
-	e.parallelFor(ctx, nch, func(ci int) {
-		k := &keyer{seedA: seedA, seedB: seedB}
+	if err := e.parallelFor(ctx, rangeChapters, func(k int) {
+		ci := firstChapter + k
+		keyer := &keyer{seedA: seedA, seedB: seedB}
 		ch := &doc.chapters[ci]
-		breakKeys[ci] = chapterBreakKey(k, doc, ch, opts, typo)
-		pageKeys[ci] = pageKey(k, breakKeys[ci], typo, contentH)
-	})
+		breakKeys[ci] = chapterBreakKey(keyer, doc, ch, opts, typo)
+		pageKeys[ci] = pageKey(keyer, breakKeys[ci], typo, contentH)
+	}); err != nil {
+		return nil, err
+	}
+	run.addTasks(rangeChapters)
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	currentPaintKey := paintKey(variants.newKeyer(), pageKeys, typo)
+	run.keys = e.elapsed(keyStart)
 	e.stop(keyStart, &e.stats.keys)
 
 	// Pass 2: find cached line boxes. Only chapters whose BreakKey is absent
@@ -257,14 +342,22 @@ func (e *Engine) layoutDoc(ctx context.Context, doc *Document, opts LayoutOption
 	breaks := make([]*breakChapter, nch)
 	needBreak := make([]bool, nch)
 	anyBreak := false
-	for ci := 0; ci < nch; ci++ {
+	maxLines := e.limits.MaxLines
+	lineCount := 0
+	for ci := firstChapter; ci < lastChapter; ci++ {
 		key := cacheKey{chapter: ci, fonts: opts.Fonts, key: breakKeys[ci]}
 		if bc := variants.getBreak(key); bc != nil {
 			breaks[ci] = bc
+			// Cached line boxes count towards MaxLines too: a Relayout that
+			// reuses a break cache must not be able to bypass the limit.
+			lineCount += countBreakLines(bc.units)
 		} else {
 			needBreak[ci] = true
 			anyBreak = true
 		}
+	}
+	if maxLines > 0 && lineCount > maxLines {
+		return nil, docErrorf(ErrLimitExceeded, "lines %d > limit %d", lineCount, maxLines)
 	}
 
 	pool := e.workerPool(opts.Fonts)
@@ -275,24 +368,28 @@ func (e *Engine) layoutDoc(ctx context.Context, doc *Document, opts LayoutOption
 		// is a flat list of paragraphs to break.
 		plans := make([]*chapterPlan, nch)
 		planErrs := make([]error, nch)
-		e.parallelFor(ctx, nch, func(ci int) {
+		if err := e.parallelFor(ctx, rangeChapters, func(k int) {
+			ci := firstChapter + k
 			if !needBreak[ci] {
 				return
 			}
 			explicit := explicitLineHeights(doc, &doc.chapters[ci])
-			p, err := planChapter(doc, opts, typo, defaultLang, e.limits, ci, explicit)
-			if err != nil {
-				planErrs[ci] = err
+			p, perr := planChapter(doc, opts, typo, defaultLang, e.limits, ci, explicit, sink)
+			if perr != nil {
+				planErrs[ci] = perr
 				return
 			}
 			plans[ci] = p
-		})
+		}); err != nil {
+			return nil, err
+		}
+		run.addTasks(rangeChapters)
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		for _, err := range planErrs {
-			if err != nil {
-				return nil, err
+		for _, perr := range planErrs {
+			if perr != nil {
+				return nil, perr
 			}
 		}
 
@@ -300,18 +397,20 @@ func (e *Engine) layoutDoc(ctx context.Context, doc *Document, opts LayoutOption
 		// list, so the load is balanced by text rather than by document shape.
 		// A book whose whole body is a single block still fills every worker.
 		var tasks []*paraTask
-		for _, p := range plans {
-			if p != nil {
+		for ci := firstChapter; ci < lastChapter; ci++ {
+			if p := plans[ci]; p != nil {
 				tasks = append(tasks, p.tasks...)
 			}
 		}
-		if err := e.breakParagraphs(ctx, pool, tasks, opts, typo, defaultLang); err != nil {
+		if err := e.breakParagraphs(ctx, pool, tasks, opts, typo, defaultLang, sink, run); err != nil {
 			return nil, err
 		}
+		run.addTasks(len(tasks))
 
 		// Phase C: put the lines back into the plan's unit tree, in document
 		// order, and publish the chapter.
-		for ci, plan := range plans {
+		for ci := firstChapter; ci < lastChapter; ci++ {
+			plan := plans[ci]
 			if plan == nil {
 				continue
 			}
@@ -335,15 +434,22 @@ func (e *Engine) layoutDoc(ctx context.Context, doc *Document, opts LayoutOption
 			if next != len(plan.tasks) {
 				// The attach pass is the one place where a plan and its unit tree
 				// must agree; a mismatch would silently drop lines, so report it.
-				return nil, fmt.Errorf("%w: chapter %q attached %d of %d paragraphs",
-					ErrInvalidDocument, doc.chapters[ci].ID, next, len(plan.tasks))
+				return nil, chapterErrorf(ErrInvalidDocument, doc.chapters[ci].ID,
+					"attached %d of %d paragraphs", next, len(plan.tasks))
 			}
 			units = pruneUnits(units)
 			bc := &breakChapter{key: breakKeys[ci], units: units}
 			breaks[ci] = bc
 			variants.putBreak(cacheKey{chapter: ci, fonts: opts.Fonts, key: breakKeys[ci]}, bc)
+			for _, task := range plan.tasks {
+				lineCount += len(task.lines)
+			}
+		}
+		if maxLines > 0 && lineCount > maxLines {
+			return nil, docErrorf(ErrLimitExceeded, "lines %d > limit %d", lineCount, maxLines)
 		}
 	}
+	run.brk = e.elapsed(breakStart)
 	e.stop(breakStart, &e.stats.brk)
 
 	// Pass 3: reuse complete page maps when PageKey is unchanged, otherwise
@@ -352,60 +458,80 @@ func (e *Engine) layoutDoc(ctx context.Context, doc *Document, opts LayoutOption
 	// numbering is stitched together in order below.
 	laid := make([]*chapterFlow, nch)
 	needPage := make([]bool, nch)
-	for ci := 0; ci < nch; ci++ {
+	maxPages := e.limits.MaxPages
+	totalPages := 0
+	for ci := firstChapter; ci < lastChapter; ci++ {
 		key := cacheKey{chapter: ci, fonts: opts.Fonts, key: pageKeys[ci]}
 		if lc := variants.getPage(key); lc != nil {
 			laid[ci] = lc
+			// Cached page maps count towards MaxPages too.
+			totalPages += len(lc.pages)
 		} else {
 			needPage[ci] = true
 		}
 	}
+	if maxPages > 0 && totalPages > maxPages {
+		return nil, docErrorf(ErrLimitExceeded, "pages %d > limit %d", totalPages, maxPages)
+	}
 	pageErrs := make([]error, nch)
-	e.parallelFor(ctx, nch, func(ci int) {
+	if err := e.parallelFor(ctx, rangeChapters, func(k int) {
+		ci := firstChapter + k
 		if !needPage[ci] {
 			return
 		}
 		ch := &doc.chapters[ci]
 		root := &ch.Nodes[ch.Root]
 		rootStyle := resolveStyle(doc.style(root.Style), typo)
-		lc, err := e.layChapter(ctx, ch, ci, breaks[ci], rootStyle, typo, contentH, contentWidth(opts))
-		if err != nil {
-			pageErrs[ci] = err
+		lc, perr := e.layChapter(ctx, ch, ci, breaks[ci], rootStyle, typo, contentH, contentWidth(opts), maxPages, run)
+		if perr != nil {
+			pageErrs[ci] = perr
 			return
 		}
 		laid[ci] = lc
-	})
+	}); err != nil {
+		return nil, err
+	}
+	run.addTasks(rangeChapters)
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	for _, err := range pageErrs {
-		if err != nil {
-			return nil, err
+	for _, perr := range pageErrs {
+		if perr != nil {
+			return nil, perr
 		}
 	}
-	for ci := 0; ci < nch; ci++ {
+	for ci := firstChapter; ci < lastChapter; ci++ {
 		if needPage[ci] {
 			variants.putPage(cacheKey{chapter: ci, fonts: opts.Fonts, key: pageKeys[ci]}, laid[ci])
+			totalPages += len(laid[ci].pages)
 		}
+	}
+	if maxPages > 0 && totalPages > maxPages {
+		return nil, docErrorf(ErrLimitExceeded, "pages %d > limit %d", totalPages, maxPages)
 	}
 
 	asmStart := e.mark()
 	l := &Layout{
-		engine:    e,
-		doc:       doc,
-		opts:      opts,
-		pool:      pool,
-		cache:     make(map[int]*Page),
-		anchors:   make(map[AnchorID]anchorPos),
-		variants:  variants,
-		breakKeys: breakKeys,
-		pageKeys:  pageKeys,
-		paintKey:  currentPaintKey,
-		lineCache: newLineCache(e.lineCache),
-		lang:      defaultLang,
+		engine:       e,
+		doc:          doc,
+		opts:         opts,
+		pool:         pool,
+		cache:        make(map[int]*Page),
+		anchors:      make(map[AnchorID]anchorPos),
+		variants:     variants,
+		breakKeys:    breakKeys,
+		pageKeys:     pageKeys,
+		paintKey:     currentPaintKey,
+		lineCache:    newLineCache(e.lineCache),
+		lang:         defaultLang,
+		firstChapter: firstChapter,
+		lastChapter:  lastChapter,
 	}
+	// Chapters outside the range keep a zero-valued chapterFlow so that a
+	// Location can still hold the document's chapter index. Only included
+	// chapters are assembled and contribute pages.
 	l.chapters = make([]chapterFlow, nch)
-	for ci := 0; ci < nch; ci++ {
+	for ci := firstChapter; ci < lastChapter; ci++ {
 		ch := &doc.chapters[ci]
 		lc := laid[ci]
 		cf := chapterFlow{
@@ -432,13 +558,21 @@ func (e *Engine) layoutDoc(ctx context.Context, doc *Document, opts LayoutOption
 		}
 		l.chapters[ci] = cf
 	}
-	l.initScroll()
+	if err := l.initScroll(); err != nil {
+		return nil, err
+	}
+	run.assemble = e.elapsed(asmStart)
 	e.stop(asmStart, &e.stats.assemble)
 	return l, nil
 }
 
 // layChapter turns cached line boxes into flow items, positions them with the
 // current vertical typography, and paginates. It does not shape.
+//
+// maxPages bounds this chapter's page map; totalPages across chapters is
+// checked by layoutDoc before the layout is published. run is the owning call's
+// per-call accumulator: Stack and Paginate are added there while the engine
+// totals keep accumulating in parallel.
 func (e *Engine) layChapter(
 	ctx context.Context,
 	ch *Chapter,
@@ -448,9 +582,11 @@ func (e *Engine) layChapter(
 	typo Typography,
 	contentH float32,
 	availW float32,
+	maxPages int,
+	run *layoutRun,
 ) (*chapterFlow, error) {
 	if bc == nil {
-		return nil, fmt.Errorf("%w: chapter %q has no break result", ErrInvalidDocument, ch.ID)
+		return nil, chapterErrorf(ErrInvalidDocument, ch.ID, "has no break result")
 	}
 	stackStart := e.mark()
 	bt, _, bb, bl := borderWidths(rootStyle)
@@ -475,15 +611,21 @@ func (e *Engine) layChapter(
 	lc.nodeAnchor = place.nodeAnchor
 	lc.anchors = place.anchors
 	lc.height += yShift + rootStyle.MarginBottom
+	run.stackNs.Add(int64(e.elapsed(stackStart)))
 	e.stop(stackStart, &e.stats.stack)
 	pageStart := e.mark()
-	lc.pages = paginate(ctx, lc, contentH, typo)
+	var err error
+	lc.pages, err = paginate(ctx, lc, contentH, typo, maxPages)
+	if err != nil {
+		return nil, err
+	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	for pi := range lc.pages {
 		lc.pages[pi].chapter = ci
 	}
+	run.paginateNs.Add(int64(e.elapsed(pageStart)))
 	e.stop(pageStart, &e.stats.paginate)
 	return lc, nil
 }
@@ -538,7 +680,7 @@ type chapterPlan struct {
 // planChapter resolves styles and tokenizes one chapter without shaping
 // anything. It is the first of the three break phases (plan, break, attach) and
 // its cost is O(nodes), not O(lines), so it never needs to be parallel itself.
-func planChapter(doc *Document, opts LayoutOptions, typo Typography, lang language.Language, limits Limits, ci int, explicit map[NodeID]float32) (*chapterPlan, error) {
+func planChapter(doc *Document, opts LayoutOptions, typo Typography, lang language.Language, limits Limits, ci int, explicit map[NodeID]float32, sink *issueSink) (*chapterPlan, error) {
 	ch := &doc.chapters[ci]
 	nodes := ch.Nodes
 	root := &nodes[ch.Root]
@@ -546,14 +688,16 @@ func planChapter(doc *Document, opts LayoutOptions, typo Typography, lang langua
 	_, rootRight, _, rootLeft := borderWidths(rootStyle)
 	width := contentWidth(opts) - rootStyle.MarginLeft - rootStyle.MarginRight - rootLeft - rootRight
 	if width <= 0 {
-		return nil, fmt.Errorf("%w: chapter %q has non-positive content width", ErrInvalidOptions, ch.ID)
+		return nil, chapterErrorf(ErrInvalidOptions, ch.ID, "non-positive content width")
 	}
 	plan := &chapterPlan{}
-	lc := &layoutContext{doc: doc, typo: typo}
+	lc := &layoutContext{doc: doc, typo: typo, chapter: ch.ID}
 	bc := &breakContext{
 		doc:        doc,
+		chapter:    ch.ID,
 		typo:       typo,
 		limits:     limits,
+		issues:     sink,
 		inline:     lc,
 		explicitLH: explicit,
 		plan:       plan,
@@ -582,7 +726,7 @@ func planChapter(doc *Document, opts LayoutOptions, typo Typography, lang langua
 	var pending []inlineToken
 	for _, child := range root.Children {
 		if child < 0 || int(child) >= len(nodes) {
-			return nil, fmt.Errorf("%w: child %d out of range", ErrInvalidDocument, child)
+			return nil, chapterErrorf(ErrInvalidDocument, ch.ID, "child %d out of range", child)
 		}
 		cn := &nodes[child]
 		if cn.Kind == NodeBlock {
@@ -610,22 +754,39 @@ func planChapter(doc *Document, opts LayoutOptions, typo Typography, lang langua
 // breakParagraphs shapes and line-breaks a flat list of paragraphs on the
 // engine's budget. Every task writes only its own slot, so the result does not
 // depend on how many workers ran or in which order they finished.
-func (e *Engine) breakParagraphs(ctx context.Context, pool *sync.Pool, tasks []*paraTask, opts LayoutOptions, typo Typography, lang language.Language) error {
+//
+// Each worker is pointed at the call's issue sink and at the call's shaping
+// counter for the duration of its task; both are cleared before the worker goes
+// back to the pool, so a later page or tile build cannot report into a finished
+// call.
+func (e *Engine) breakParagraphs(ctx context.Context, pool *sync.Pool, tasks []*paraTask, opts LayoutOptions, typo Typography, lang language.Language, sink *issueSink, run *layoutRun) error {
 	if len(tasks) == 0 {
 		return nil
 	}
 	errs := make([]error, len(tasks))
-	e.parallelFor(ctx, len(tasks), func(i int) {
+	if err := e.parallelFor(ctx, len(tasks), func(i int) {
 		t := tasks[i]
 		w := leaseWorker(pool, typo, opts.Hyphenator, lang)
+		prevShapes := w.shapes
+		w.issues = sink
+		w.shapes = &run.shapes
+		// The reset is a defer: a panic in wrapParagraph is recovered by
+		// runTask after this function's defers run, and the worker must still go
+		// back to the pool without the call's sink or shape counter.
+		defer func() {
+			w.issues = nil
+			w.shapes = prevShapes
+			releaseWorker(pool, w)
+		}()
 		lines, err := w.wrapParagraph(ctx, t.para, t.width, typo, t.style, lang)
-		releaseWorker(pool, w)
 		if err != nil {
 			errs[i] = err
 			return
 		}
 		t.setLines(lines)
-	})
+	}); err != nil {
+		return err
+	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -1050,9 +1211,13 @@ func lineX(align TextAlign, avail, width float32) float32 {
 // breakContext is the per-task state for shaping and line breaking. It only
 // produces break units; vertical placement happens later in layChapter.
 type breakContext struct {
-	doc        *Document
+	doc *Document
+	// chapter is the ID of the chapter being planned. It is copied onto every
+	// paragraph and onto the issues this walk reports.
+	chapter    string
 	typo       Typography
 	limits     Limits
+	issues     *issueSink
 	inline     *layoutContext
 	explicitLH map[NodeID]float32
 	// plan collects the paragraphs this walk produces, in document order. The
@@ -1063,14 +1228,14 @@ type breakContext struct {
 
 func (bc *breakContext) block(nodes []Node, id NodeID, parentWidth float32, parentStyle Style) (*breakBox, error) {
 	if id < 0 || int(id) >= len(nodes) {
-		return nil, fmt.Errorf("%w: block node %d out of range", ErrInvalidDocument, id)
+		return nil, nodeErrorf(ErrInvalidDocument, bc.chapter, id, "block node out of range")
 	}
 	n := &nodes[id]
 	st := inheritStyle(parentStyle, bc.doc.style(n.Style), bc.typo)
 	_, br, _, bl := borderWidths(st)
 	contentW := parentWidth - st.MarginLeft - st.MarginRight - bl - br
 	if contentW <= 0 {
-		return nil, fmt.Errorf("%w: block %d has non-positive content width", ErrInvalidDocument, id)
+		return nil, nodeErrorf(ErrInvalidDocument, bc.chapter, id, "non-positive content width")
 	}
 	box := &breakBox{
 		style:        st,
@@ -1102,7 +1267,7 @@ func (bc *breakContext) block(nodes []Node, id NodeID, parentWidth float32, pare
 
 	for _, child := range n.Children {
 		if child < 0 || int(child) >= len(nodes) {
-			return nil, fmt.Errorf("%w: child %d out of range", ErrInvalidDocument, child)
+			return nil, nodeErrorf(ErrInvalidDocument, bc.chapter, child, "child out of range")
 		}
 		cn := &nodes[child]
 		if cn.Kind == NodeBlock {
@@ -1156,7 +1321,7 @@ func (bc *breakContext) tokens(tokens []inlineToken, width float32, blockStyle S
 			for j < len(tokens) && tokens[j].kind == tokenText {
 				j++
 			}
-			p := &paragraph{style: blockStyle}
+			p := &paragraph{style: blockStyle, chapter: bc.chapter}
 			for k := i; k < j; k++ {
 				t := &tokens[k]
 				start := p.runeLen
@@ -1195,6 +1360,10 @@ func (bc *breakContext) tokens(tokens []inlineToken, width float32, blockStyle S
 
 func (bc *breakContext) imageUnit(tok *inlineToken, width float32, blockStyle Style) (breakUnit, bool, error) {
 	if tok.w <= 0 && tok.h <= 0 {
+		// The IR has no way to express an image without a size, and layout
+		// cannot invent one: drop the unit but report it, so a host can point at
+		// the source tag instead of silently losing the picture.
+		bc.issues.add(IssueDroppedContent, bc.chapter, tok.node, "image has no width or height; dropped from layout")
 		return breakUnit{}, false, nil
 	}
 	w, h := tok.w, tok.h
@@ -1212,7 +1381,8 @@ func (bc *breakContext) imageUnit(tok *inlineToken, width float32, blockStyle St
 	}
 	pixels := int64(w * h)
 	if bc.limits.MaxImagePixels > 0 && pixels > bc.limits.MaxImagePixels {
-		return breakUnit{}, false, fmt.Errorf("%w: image %d is %d pixels", ErrLimitExceeded, tok.node, pixels)
+		return breakUnit{}, false, nodeErrorf(ErrLimitExceeded, bc.chapter, tok.node,
+			"image pixels %d > limit %d", pixels, bc.limits.MaxImagePixels)
 	}
 	x := float32(0)
 	align := blockStyle.TextAlign
@@ -1377,36 +1547,58 @@ func (cf *chapterFlow) pageItem(i int) pageItem {
 }
 
 // paginate slices a flowed chapter into pages. Page top values are absolute
-// chapter content coordinates.
-func paginate(ctx context.Context, cf *chapterFlow, pageHeight float32, typo Typography) []pageInfo {
-	return paginateN(ctx, cf.count(), cf.pageItem, pageHeight, typo)
+// chapter content coordinates. maxPages bounds the page count: it is checked
+// before every append, so a pathological configuration fails instead of
+// allocating millions of page maps.
+func paginate(ctx context.Context, cf *chapterFlow, pageHeight float32, typo Typography, maxPages int) ([]pageInfo, error) {
+	return paginateLimited(ctx, cf.count(), cf.pageItem, pageHeight, typo, maxPages)
 }
 
 // paginateN is paginate over an item accessor, so the pagination rules can be
-// tested without building a whole chapter flow.
+// tested without building a whole chapter flow. It performs no limit check.
 func paginateN(ctx context.Context, n int, at func(int) pageItem, pageHeight float32, typo Typography) []pageInfo {
+	pages, _ := paginateLimited(ctx, n, at, pageHeight, typo, 0)
+	return pages
+}
+
+// paginateLimited is paginateN with the MaxPages check. A maxPages <= 0 means
+// unlimited, which only the test helper uses.
+func paginateLimited(ctx context.Context, n int, at func(int) pageItem, pageHeight float32, typo Typography, maxPages int) ([]pageInfo, error) {
 	typo.Rules = typo.Rules.withDefaults()
 	if n == 0 {
-		return []pageInfo{{chapter: 0, first: 0, last: 0, top: 0}}
+		return []pageInfo{{chapter: 0, first: 0, last: 0, top: 0}}, nil
+	}
+	// addPage appends one page, enforcing the page limit before the append.
+	var pages []pageInfo
+	addPage := func(p pageInfo) error {
+		if maxPages > 0 && len(pages) >= maxPages {
+			return docErrorf(ErrLimitExceeded, "pages %d > limit %d", len(pages)+1, maxPages)
+		}
+		pages = append(pages, p)
+		return nil
 	}
 	const eps = 0.01
-	pages := make([]pageInfo, 0, n/20+1)
+	pages = make([]pageInfo, 0, n/20+1)
 	first := 0
 	i := 0
 	pageTop := float32(0)
 	it := at(0)
 	for i < n {
 		if i%2048 == 0 && ctx.Err() != nil {
-			return pages
+			return pages, nil
 		}
 		if i > first && it.breakBefore {
-			pages = append(pages, pageInfo{first: first, last: i, top: pageTop})
+			if err := addPage(pageInfo{first: first, last: i, top: pageTop}); err != nil {
+				return nil, err
+			}
 			first = i
 			pageTop = it.y
 			continue
 		}
 		if i > first && at(i-1).breakAfter {
-			pages = append(pages, pageInfo{first: first, last: i, top: pageTop})
+			if err := addPage(pageInfo{first: first, last: i, top: pageTop}); err != nil {
+				return nil, err
+			}
 			first = i
 			pageTop = it.y
 			continue
@@ -1463,7 +1655,9 @@ func paginateN(ctx context.Context, n int, at func(int) pageItem, pageHeight flo
 		if breakAt <= first {
 			breakAt = first + 1
 		}
-		pages = append(pages, pageInfo{first: first, last: breakAt, top: pageTop})
+		if err := addPage(pageInfo{first: first, last: breakAt, top: pageTop}); err != nil {
+			return nil, err
+		}
 		first = breakAt
 		pageTop = at(first).y
 		i = breakAt
@@ -1471,8 +1665,27 @@ func paginateN(ctx context.Context, n int, at func(int) pageItem, pageHeight flo
 			it = at(i)
 		}
 	}
-	pages = append(pages, pageInfo{first: first, last: n, top: pageTop})
-	return pages
+	if err := addPage(pageInfo{first: first, last: n, top: pageTop}); err != nil {
+		return nil, err
+	}
+	return pages, nil
+}
+
+// countBreakLines counts the line boxes of a cached break chapter, including
+// nested blocks, so MaxLines sees reused line boxes exactly as it sees freshly
+// broken ones.
+func countBreakLines(units []breakUnit) int {
+	n := 0
+	for i := range units {
+		u := &units[i]
+		switch u.kind {
+		case breakLines:
+			n += len(u.lines)
+		case breakBlockUnit:
+			n += countBreakLines(u.box.units)
+		}
+	}
+	return n
 }
 
 func (e *Engine) checkLimits(ctx context.Context, doc *Document) error {
@@ -1487,7 +1700,7 @@ func (e *Engine) checkLimits(ctx context.Context, doc *Document) error {
 		ch := &doc.chapters[ci]
 		nodes += len(ch.Nodes)
 		if nodes > lim.MaxNodes {
-			return fmt.Errorf("%w: nodes exceed %d", ErrLimitExceeded, lim.MaxNodes)
+			return docErrorf(ErrLimitExceeded, "nodes %d > limit %d", nodes, lim.MaxNodes)
 		}
 		if err := checkDepth(ch, lim.MaxDepth); err != nil {
 			return err
@@ -1496,12 +1709,13 @@ func (e *Engine) checkLimits(ctx context.Context, doc *Document) error {
 			n := &ch.Nodes[ni]
 			runes += utf8.RuneCountInString(n.Text)
 			if runes > lim.MaxTextRunes {
-				return fmt.Errorf("%w: text exceeds %d runes", ErrLimitExceeded, lim.MaxTextRunes)
+				return chapterErrorf(ErrLimitExceeded, ch.ID, "text runes %d > limit %d", runes, lim.MaxTextRunes)
 			}
 			if n.Kind == NodeImage && n.Width > 0 && n.Height > 0 {
 				pixels += int64(n.Width * n.Height)
 				if pixels > lim.MaxImagePixels {
-					return fmt.Errorf("%w: image pixels exceed %d", ErrLimitExceeded, lim.MaxImagePixels)
+					return chapterErrorf(ErrLimitExceeded, ch.ID,
+						"image pixels %d > limit %d", pixels, lim.MaxImagePixels)
 				}
 			}
 		}
@@ -1520,10 +1734,10 @@ func checkDepth(ch *Chapter, maxDepth int) error {
 		f := stack[len(stack)-1]
 		stack = stack[:len(stack)-1]
 		if f.node < 0 || int(f.node) >= len(ch.Nodes) {
-			return fmt.Errorf("%w: chapter %q node %d out of range", ErrInvalidDocument, ch.ID, f.node)
+			return chapterErrorf(ErrInvalidDocument, ch.ID, "node %d out of range", f.node)
 		}
 		if f.depth > maxDepth {
-			return fmt.Errorf("%w: chapter %q exceeds max depth %d", ErrLimitExceeded, ch.ID, maxDepth)
+			return chapterErrorf(ErrLimitExceeded, ch.ID, "depth %d > limit %d", f.depth, maxDepth)
 		}
 		if seen[f.node] {
 			continue
@@ -1587,10 +1801,7 @@ func (l *Layout) PageOf(loc Location) (int, bool) {
 		return 0, false
 	}
 	loc, ok := l.resolveLocation(loc)
-	if !ok {
-		return 0, false
-	}
-	if loc.Chapter < 0 || loc.Chapter >= len(l.chapters) {
+	if !ok || !l.inRange(loc.Chapter) {
 		return 0, false
 	}
 	cf := &l.chapters[loc.Chapter]
@@ -1616,6 +1827,9 @@ func (l *Layout) LocationOfPage(page int) (Location, bool) {
 		return Location{}, false
 	}
 	info := &l.pages[page]
+	if !l.inRange(info.chapter) {
+		return Location{}, false
+	}
 	cf := &l.chapters[info.chapter]
 	if info.first < 0 || info.first >= info.last || info.first >= cf.count() {
 		return Location{}, false
@@ -1634,9 +1848,10 @@ func (l *Layout) LocationOfPage(page int) (Location, bool) {
 //
 // PageRange is paged-mode only. Scroll layouts have no pages (PageCount returns
 // 0), so they report ok=false; use ChapterContentTop for the chapter's start in
-// scroll content coordinates.
+// scroll content coordinates. Chapters outside a ranged layout's range report
+// ok=false as well.
 func (l *Layout) PageRange(chapter int) (first, count int, ok bool) {
-	if l.opts.Mode == ModeScroll || chapter < 0 || chapter >= len(l.chapters) {
+	if l.opts.Mode == ModeScroll || !l.inRange(chapter) {
 		return 0, 0, false
 	}
 	cf := &l.chapters[chapter]
@@ -1647,14 +1862,20 @@ func (l *Layout) PageRange(chapter int) (first, count int, ok bool) {
 // order, or nil in scroll mode, where pages are not part of the output.
 //
 // ChapterPages()[i] equals the first value of PageRange(i), so a host can build
-// a table of contents or a progress bar without walking pages itself.
+// a table of contents or a progress bar without walking pages itself. For a
+// ranged layout the slice is still indexed by the document's chapter index:
+// chapters outside the range have no page and report -1.
 func (l *Layout) ChapterPages() []int {
 	if l.opts.Mode == ModeScroll {
 		return nil
 	}
 	out := make([]int, len(l.chapters))
-	for i := range l.chapters {
-		out[i] = l.chapters[i].firstPage
+	for i := range out {
+		if l.inRange(i) {
+			out[i] = l.chapters[i].firstPage
+		} else {
+			out[i] = -1
+		}
 	}
 	return out
 }
@@ -1675,15 +1896,22 @@ func (l *Layout) ChapterPages() []int {
 // The method exists for both modes so a host can build a chapter list once and
 // resolve it to pages (paged) or to a scroll position (scroll). Consecutive
 // values, plus ContentHeight for the last chapter, give each chapter's extent
-// without a second accessor.
+// without a second accessor. Chapters outside a ranged layout's range report
+// ok=false.
 func (l *Layout) ChapterContentTop(chapter int) (float32, bool) {
-	if chapter < 0 || chapter >= len(l.chapters) {
+	if !l.inRange(chapter) {
 		return 0, false
 	}
 	if l.opts.Mode == ModeScroll {
 		return l.chapterTop[chapter], true
 	}
 	return float32(l.chapters[chapter].firstPage) * contentHeight(l.opts), true
+}
+
+// inRange reports whether a document chapter index is inside the range this
+// layout covers. A full-document layout covers every chapter.
+func (l *Layout) inRange(chapter int) bool {
+	return chapter >= l.firstChapter && chapter < l.lastChapter
 }
 
 // resolveLocation resolves a location to a laid-out node. A non-zero anchor is
@@ -1699,9 +1927,9 @@ func (l *Layout) resolveLocation(loc Location) (Location, bool) {
 		loc.Node = pos.node
 		// Keep loc.Offset: an anchor names the node, the caller may add a rune
 		// position inside it.
-		return loc, true
+		return loc, l.inRange(loc.Chapter)
 	}
-	if loc.Chapter >= 0 && loc.Chapter < len(l.chapters) && loc.Node != InvalidNode {
+	if l.inRange(loc.Chapter) && loc.Node != InvalidNode {
 		if nf := l.chapters[loc.Chapter].nodeFirst; int(loc.Node) < len(nf) && nf[loc.Node] >= 0 {
 			return loc, true
 		}
@@ -1779,7 +2007,15 @@ func (cf *chapterFlow) itemEnd(i int) int32 {
 
 // Relayout computes a new layout with different options. The receiver is not
 // modified. Line boxes and page maps are reused when their keys are unchanged.
+//
+// The receiver's chapter range is kept unless opts.Range names another one, so
+// a host that lays out one chapter at a time does not have to pass the range
+// again for every typography change.
 func (l *Layout) Relayout(ctx context.Context, opts LayoutOptions) (*Layout, error) {
+	if opts.Range == nil && l.opts.Range != nil {
+		r := *l.opts.Range
+		opts.Range = &r
+	}
 	return l.engine.layoutDoc(ctx, l.doc, opts, l.variants)
 }
 
@@ -1813,6 +2049,11 @@ func (l *Layout) WithColors(ink, background, link paint.Color) *Layout {
 		lineCache: newLineCache(l.engine.lineCache),
 		cache:     make(map[int]*Page),
 		lang:      l.lang,
+
+		issues:       l.issues,
+		stats:        l.stats,
+		firstChapter: l.firstChapter,
+		lastChapter:  l.lastChapter,
 	}
 	n.chapterTop, n.contentHeight = l.chapterTop, l.contentHeight
 	n.tileHeight, n.tileCount = l.tileHeight, l.tileCount
@@ -1827,7 +2068,13 @@ func (l *Layout) WithColors(ink, background, link paint.Color) *Layout {
 // call, so workers are never held across an API boundary and a Layout has no
 // shutdown to perform.
 func (l *Layout) leaseWorker() *textWorker {
-	return leaseWorker(l.pool, l.opts.Typography, l.opts.Hyphenator, l.lang)
+	w := leaseWorker(l.pool, l.opts.Typography, l.opts.Hyphenator, l.lang)
+	// Diagnostics are collected during a layout call, not while lazily drawing
+	// a page or a tile: clear any sink a previous lease left behind so the
+	// pooled worker cannot report into a call that already delivered its
+	// issues.
+	w.issues = nil
+	return w
 }
 
 func (l *Layout) releaseWorker(w *textWorker) {

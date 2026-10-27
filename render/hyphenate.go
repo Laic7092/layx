@@ -109,5 +109,7 @@ func (w *textWorker) hyphenatedParagraph(p *paragraph, text []rune) (*paragraph,
 		seg.end = wrapIndex[seg.end]
 		segs[i] = seg
 	}
-	return &paragraph{segs: segs, style: p.style, runeLen: int32(len(wrapText))}, wrapText, origIndex, wrapHyph
+	// The narrowed copy must keep the chapter ID: diagnostics raised while
+	// breaking it name the chapter through paragraph.chapter.
+	return &paragraph{segs: segs, style: p.style, chapter: p.chapter, runeLen: int32(len(wrapText))}, wrapText, origIndex, wrapHyph
 }

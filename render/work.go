@@ -2,6 +2,7 @@ package render
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -65,18 +66,30 @@ func (b *budget) avail() int { return int(b.free.Load()) }
 // Helpers take one without blocking, work, and give it back; the caller works
 // regardless. Nested phases (a page built inside a prefetch) therefore degrade
 // to running on their caller instead of waiting for their parent.
-func (e *Engine) parallelFor(ctx context.Context, n int, fn func(i int)) {
-	if n <= 0 || ctx.Err() != nil {
-		return
+//
+// parallelFor cannot panic on behalf of fn: runTask converts a panic in fn into
+// an error wrapping ErrInternal, both on the calling goroutine and on helpers.
+// The first panic is returned and no further task is handed out; tasks already
+// running are allowed to finish, so when parallelFor returns every helper has
+// joined and every budget token has been returned. A cancelled context wins
+// over the recovered error.
+func (e *Engine) parallelFor(ctx context.Context, n int, fn func(i int)) error {
+	if n <= 0 {
+		return ctx.Err()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	if n == 1 || e.workers <= 1 {
 		for i := 0; i < n; i++ {
-			if ctx.Err() != nil {
-				return
+			if err := ctx.Err(); err != nil {
+				return err
 			}
-			e.runTask(0, fn, i)
+			if err := e.runTask(0, fn, i); err != nil {
+				return err
+			}
 		}
-		return
+		return nil
 	}
 
 	e.active.Add(1)
@@ -84,10 +97,26 @@ func (e *Engine) parallelFor(ctx context.Context, n int, fn func(i int)) {
 	e.stats.tasks.Add(int64(n))
 
 	var (
-		claim atomic.Int64
-		live  atomic.Int32
-		wg    sync.WaitGroup
+		claim  atomic.Int64
+		live   atomic.Int32
+		failed atomic.Bool
+		errMu  sync.Mutex
+		first  error
+		wg     sync.WaitGroup
 	)
+	// fail records the first panic. Once it is set, workers stop claiming new
+	// tasks; helpers still in flight finish theirs and join.
+	fail := func(err error) {
+		if err == nil {
+			return
+		}
+		failed.Store(true)
+		errMu.Lock()
+		if first == nil {
+			first = err
+		}
+		errMu.Unlock()
+	}
 	// spawn starts one helper. Its ordinal is its position among the phase's
 	// helpers; a helper whose ordinal no longer fits the (shrunk) share retires
 	// at its next task boundary and releases its token.
@@ -108,11 +137,22 @@ func (e *Engine) parallelFor(ctx context.Context, n int, fn func(i int)) {
 			defer wg.Done()
 			defer e.budget.give()
 			defer live.Add(-1)
+			// No panic may escape a helper goroutine: a panic recovered here is
+			// a bug in the scheduling code itself (runTask already covers fn),
+			// and the host can still receive it as an error.
+			defer func() {
+				if r := recover(); r != nil {
+					fail(internalErr(r))
+				}
+			}()
 			// The share check is a shared-cache-line read; checking it on every
 			// task of a paragraph-sized phase costs more than it saves. Tasks
 			// are short, so a delay of a few tasks before a helper retires is
 			// still tens of microseconds.
 			for taken := 0; ; taken++ {
+				if failed.Load() {
+					return
+				}
 				if taken&7 == 0 && ordinal >= e.phaseLimit()-1 {
 					return
 				}
@@ -120,7 +160,10 @@ func (e *Engine) parallelFor(ctx context.Context, n int, fn func(i int)) {
 				if i >= n || ctx.Err() != nil {
 					return
 				}
-				e.runTask(slot, fn, i)
+				if err := e.runTask(slot, fn, i); err != nil {
+					fail(err)
+					return
+				}
 			}
 		}()
 		return true
@@ -131,6 +174,9 @@ func (e *Engine) parallelFor(ctx context.Context, n int, fn func(i int)) {
 	// lets a phase that started while the machine was busy pick up tokens as
 	// other phases retire.
 	for taken := 0; ; taken++ {
+		if failed.Load() {
+			break
+		}
 		if taken&7 == 0 {
 			for spawn(int(live.Load())) {
 			}
@@ -139,9 +185,19 @@ func (e *Engine) parallelFor(ctx context.Context, n int, fn func(i int)) {
 		if i >= n || ctx.Err() != nil {
 			break
 		}
-		e.runTask(0, fn, i)
+		if err := e.runTask(0, fn, i); err != nil {
+			fail(err)
+			break
+		}
 	}
 	wg.Wait()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	errMu.Lock()
+	err := first
+	errMu.Unlock()
+	return err
 }
 
 // phaseLimit is the number of goroutines a single phase may use right now: its
@@ -163,15 +219,46 @@ func (e *Engine) phaseLimit() int {
 }
 
 // runTask executes one claim, timing it when Measure is on so Stats can report
-// how evenly the work was spread.
-func (e *Engine) runTask(slot int, fn func(int), i int) {
+// how evenly the work was spread. A panic in fn — the library's own bug, since
+// fn only processes the caller's already-validated document — is converted into
+// an error wrapping ErrInternal instead of tearing down the host process.
+func (e *Engine) runTask(slot int, fn func(int), i int) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = internalErr(r)
+		}
+	}()
 	if !e.measure {
 		fn(i)
-		return
+		return nil
 	}
 	start := time.Now()
 	fn(i)
 	e.stats.recordBusy(slot, time.Since(start))
+	return nil
+}
+
+// internalErr wraps a recovered panic. The panic value is kept in the message:
+// it is the only clue a host or a bug report has about what went wrong.
+func internalErr(r any) error {
+	return fmt.Errorf("%w: %v", ErrInternal, r)
+}
+
+// recoverInto converts a panic on the calling goroutine into an error wrapping
+// ErrInternal. Call it directly from a defer statement (recover only works when
+// called by the deferred function itself):
+//
+//	defer recoverInto(&err)
+//
+// It complements parallelFor: phases recover panics inside their tasks, but a
+// code path that runs on the caller without going through parallelFor (a plan
+// pass, say) still must fail with an error instead of crashing the host.
+func recoverInto(errp *error) {
+	if r := recover(); r != nil {
+		if errp != nil {
+			*errp = internalErr(r)
+		}
+	}
 }
 
 // nextSlot returns the slot id a helper reports its busy time under. Slot 0 is

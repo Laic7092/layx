@@ -354,7 +354,10 @@ func TestScrollTileBoundaries(t *testing.T) {
 	paged := layoutOptions(t, mustEngine(t, 2), doc, base)
 	want := collectPagedGlyphs(paged)
 
-	for _, height := range []float32{97, 37, 5} {
+	// 16 is MinTileHeight: the smallest tile height a layout accepts, so it
+	// cuts lines and paragraphs into pieces without being rejected as an input
+	// contract violation.
+	for _, height := range []float32{97, 37, 16} {
 		opts := base
 		opts.Mode = ModeScroll
 		opts.TileHeight = height
@@ -522,7 +525,7 @@ func TestScrollHitTest(t *testing.T) {
 	it := &itv
 	y := l.chapterTop[1] + it.y + it.height/2
 	x := it.x + 1
-	loc, ok := l.HitTest(x, y)
+	loc, ok := l.HitTest(paint.Point{X: x, Y: y})
 	if !ok {
 		t.Fatal("HitTest failed")
 	}
@@ -532,7 +535,7 @@ func TestScrollHitTest(t *testing.T) {
 	if got, ok := l.OffsetOf(loc); !ok || !closef(got, l.chapterTop[1]+it.y, 0.01) {
 		t.Fatalf("HitTest location maps to y %v, want %v", got, l.chapterTop[1]+it.y)
 	}
-	if _, ok := l.HitTest(-5000, -5000); !ok {
+	if _, ok := l.HitTest(paint.Point{X: -5000, Y: -5000}); !ok {
 		t.Fatal("HitTest far outside content should clamp to the first item")
 	}
 }

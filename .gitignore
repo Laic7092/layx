@@ -1,3 +1,10 @@
+# Shared team coordination scratch (env.sh, contract, local Go caches)
+.team/
+
+# Python bytecode from scripts/*.py
+__pycache__/
+*.py[cod]
+
 # Go test binaries and profiles
 *.test
 *.out

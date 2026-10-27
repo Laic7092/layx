@@ -484,7 +484,7 @@ func TestTableLinearizedIntoRows(t *testing.T) {
 </body></html>`)
 	style := newCascade(18, Options{}, nil)
 	styles := newStyleRegistry()
-	ch, err := convertChapter(xhtml, "t", 1, nil, nil, "OEBPS/ch1.xhtml", style, styles)
+	ch, err := convertChapter(xhtml, "t", 1, nil, nil, "OEBPS/ch1.xhtml", style, styles, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -539,7 +539,7 @@ func TestTableLinearizedIntoRows(t *testing.T) {
 }
 
 func TestEmptyChapterGetsAPlaceholder(t *testing.T) {
-	ch, err := convertChapter([]byte(`<html><body><div></div></body></html>`), "x", 1, nil, nil, "OEBPS/ch1.xhtml", newCascade(18, Options{}, nil), newStyleRegistry())
+	ch, err := convertChapter([]byte(`<html><body><div></div></body></html>`), "x", 1, nil, nil, "OEBPS/ch1.xhtml", newCascade(18, Options{}, nil), newStyleRegistry(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}

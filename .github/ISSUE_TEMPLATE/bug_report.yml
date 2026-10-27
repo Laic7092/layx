@@ -1,0 +1,105 @@
+name: Bug report
+description: Something is wrong or crashes — layout output, an error, an EPUB conversion, a panic.
+title: "[bug] "
+labels: []
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. A small, self-contained reproducer gets a fix
+        much faster than a description. If the problem is a **security issue**
+        (a panic reachable from untrusted input, a denial of service, anything
+        in `SECURITY.md`), **do not file it here** — use the private channel in
+        [`SECURITY.md`](https://github.com/Laic7092/layx/blob/main/SECURITY.md).
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What did you expect, and what did you get instead?
+      placeholder: "Layout returns the wrong page count / EPUB Build fails with ... / the process panics with ..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproducer
+    attributes:
+      label: Minimal reproducer
+      description: |
+        A Go snippet, a generated EPUB, or the exact input that triggers it.
+        Prefer `render.NewDocumentBuilder` over a real book when possible, and
+        include the `LayoutOptions`/`Options` you used.
+      render: go
+      placeholder: |
+        fonts, _ := render.NewFontSet(render.FontFace{Family: "serif", Data: fontData})
+        eng, _ := render.New(render.Options{})
+        layout, err := eng.Layout(ctx, doc, render.LayoutOptions{ /* ... */ })
+    validations:
+      required: true
+
+  - type: dropdown
+    id: module
+    attributes:
+      label: Which package
+      options:
+        - github.com/laix/layx/render
+        - github.com/laix/layx/render/paint
+        - github.com/laix/layx/render/hyphen/en
+        - github.com/laix/layx/epub
+        - examples / tools / scripts
+        - docs
+        - not sure
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+      description: Release tag, or the commit you tested (`git rev-parse --short HEAD`).
+      placeholder: "v0.1.0 / b78ad29"
+    validations:
+      required: true
+
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: Go version, GOOS/GOARCH, CGO on/off, and whether it reproduces with `-race`.
+      placeholder: "go1.26.0 linux/amd64, no cgo, reproduces on the serial and parallel path"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: panic
+    attributes:
+      label: Does it panic?
+      options:
+        - "No, it returns a wrong result"
+        - "No, it returns an error (unexpected error or wrong sentinel)"
+        - "Yes, with one Engine"
+        - "Yes, only under concurrency / -race"
+        - "Not sure"
+    validations:
+      required: true
+
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Diagnostics and errors
+      description: |
+        If you captured them: `Layout.Issues()` / `Options.OnIssue` entries, the
+        full error text, and for `*render.DocumentError` the `Kind`, `Chapter`,
+        `Node` and `Style` fields. Tokens and paths may be redacted; structure
+        matters more than names.
+      render: text
+    validations:
+      required: false
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else
+      description: Stack traces, screenshots, cache/`Relayout` details, the document shape, font files involved.
+    validations:
+      required: false

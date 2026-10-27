@@ -4,11 +4,13 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strings"
 	"sync/atomic"
 	"unicode"
 
 	"github.com/go-text/typesetting/di"
 	"github.com/go-text/typesetting/font"
+	"github.com/go-text/typesetting/harfbuzz"
 	"github.com/go-text/typesetting/language"
 	"github.com/go-text/typesetting/shaping"
 	"github.com/laix/layx/render/paint"
@@ -35,6 +37,10 @@ type paragraph struct {
 	runeLen int32
 	// style is the block style that supplies alignment and indentation.
 	style Style
+	// chapter is the ID of the chapter the paragraph belongs to. It is only
+	// used to attach diagnostics to their source; it may be empty when the
+	// paragraph is not part of a chapter.
+	chapter string
 	// width is the content width the paragraph was broken at, i.e. the
 	// available width of every line except the indented first one.
 	width float32
@@ -61,6 +67,8 @@ func (p *paragraph) segAt(off int) *paraSeg {
 	return &p.segs[i]
 }
 
+// textWorker is one goroutine's shaping scratch space. It is leased from a pool
+// for the duration of a phase and must not be shared by goroutines.
 type textWorker struct {
 	shaper      shaping.HarfbuzzShaper
 	wrapper     shaping.LineWrapper
@@ -75,6 +83,10 @@ type textWorker struct {
 	// shapes counts Shaper.Shape calls for layout benchmarks and tests. It is
 	// per Engine; a nil counter disables counting.
 	shapes *atomic.Int64
+	// issues receives diagnostics raised while breaking text. It is per layout
+	// and only set on leased workers during the break phase; nil disables
+	// reporting. issueSink is concurrency-safe, so every worker may share it.
+	issues *issueSink
 	// paraBuf is this worker's scratch buffer for materializing paragraph
 	// runes. It is owned by the worker, so no two goroutines share it.
 	paraBuf []rune
@@ -86,6 +98,7 @@ type textWorker struct {
 	// Segmentation scratch, reused per input run (see segment.go).
 	scriptRuns []shaping.Input
 	faceRuns   []shaping.Input
+	bidiRuns   []shaping.Input
 	delimStack []delimEntry
 }
 
@@ -221,6 +234,12 @@ type shapedRun struct {
 // shapeRange shapes paragraph runes [start,end). It deliberately does not
 // retain the shaped output beyond the line wrapping / drawing operation: the
 // layout itself stores only line boxes and rune ranges.
+//
+// Invariant: the returned runs cover every rune in [start,end), so a caller
+// that hands the whole range to a line wrapper can always map a rune offset to a
+// glyph cluster. splitInput is supposed to guarantee that on its own; fillShapeGaps
+// is the defensive net that makes a short list impossible (audit §2.1). In
+// particular wrapParagraph relies on the runs covering [0,len(wrapText)).
 func (w *textWorker) shapeRange(p *paragraph, text []rune, start, end int, defaultLang language.Language) []shapedRun {
 	start = clampInt(start, 0, len(text))
 	end = clampInt(end, start, len(text))
@@ -263,6 +282,7 @@ func (w *textWorker) shapeRange(p *paragraph, text []rune, start, end int, defau
 			out = append(out, shapedRun{out: shaped, style: compactRunStyle(seg.style, seg.link != ""), ref: w.refs[faceIndex(w.faces, shaped.Face)]})
 		}
 	}
+	out = w.fillShapeGaps(p, text, start, end, defaultLang, out)
 	for i := range out {
 		ls := fixed.Int26_6(out[i].style.letterSpacing * 64)
 		if ls != 0 {
@@ -277,6 +297,233 @@ func (w *textWorker) shapeRange(p *paragraph, text []rune, start, end int, defau
 		w.compressPunctuation(text, out, start, end)
 	}
 	return out
+}
+
+// fillShapeGaps enforces shapeRange's coverage invariant. The common case is a
+// contiguous, ordered list and costs one pass with no allocation; if the shaped
+// runs leave any rune of [start,end) without a glyph cluster, that hole is
+// filled with a placeholder run shaped in the fallback face. A placeholder is
+// never dropped: a rune with .notdef glyphs is still a rune the line wrapper can
+// cut at, which is what keeps go-text's wrapping from panicking on a short list.
+func (w *textWorker) fillShapeGaps(p *paragraph, text []rune, start, end int, defaultLang language.Language, runs []shapedRun) []shapedRun {
+	span := end - start
+	if span <= 0 {
+		return runs
+	}
+	// Cheap coverage test: the rune counts add up to the span and every run
+	// stays inside it. This is the shape every normal paragraph has, in any run
+	// order (bidi runs may be stored in visual order).
+	total := 0
+	inBounds := true
+	for i := range runs {
+		out := &runs[i].out
+		if out.Runes.Count <= 0 || out.Runes.Offset < start || out.Runes.Offset+out.Runes.Count > end {
+			inBounds = false
+			break
+		}
+		total += out.Runes.Count
+	}
+	if inBounds && total == span {
+		return runs
+	}
+	// Slow path: find the holes exactly and append a placeholder run for each.
+	covered := make([]bool, span)
+	for i := range runs {
+		lo := maxInt(runs[i].out.Runes.Offset, start)
+		hi := minInt(runs[i].out.Runes.Offset+runs[i].out.Runes.Count, end)
+		for r := lo; r < hi; r++ {
+			covered[r-start] = true
+		}
+	}
+	for i := 0; i < span; {
+		if covered[i] {
+			i++
+			continue
+		}
+		j := i
+		for j < span && !covered[j] {
+			j++
+		}
+		runs = append(runs, w.shapeGapRun(p, text, start+i, start+j, defaultLang))
+		i = j
+	}
+	return runs
+}
+
+// shapeGapRun shapes [lo,hi) with the fallback face for fillShapeGaps. Its
+// output covers exactly [lo,hi) runes even when the face has no glyph for them:
+// the glyphs are .notdef, but the cluster indexes are what the wrapper needs.
+func (w *textWorker) shapeGapRun(p *paragraph, text []rune, lo, hi int, defaultLang language.Language) shapedRun {
+	st := p.styleAt(lo)
+	size := resolveFontSize(st, w.typo)
+	in := shaping.Input{
+		Text:      text,
+		RunStart:  lo,
+		RunEnd:    hi,
+		Direction: di.DirectionLTR,
+		Face:      w.faces[0],
+		Size:      fixed.Int26_6(float64(size) * 64),
+		Language:  defaultLang,
+	}
+	if w.shapes != nil {
+		w.shapes.Add(1)
+	}
+	out := w.shaper.Shape(in)
+	link := false
+	if seg := p.segAt(lo); seg != nil {
+		link = seg.link != ""
+	}
+	return shapedRun{out: out, style: compactRunStyle(st, link), ref: w.refs[0]}
+}
+
+// issueSkipRune reports whether a rune must not be reported as a missing
+// glyph. Controls, bidirectional formatting characters, default ignorables and
+// spaces legitimately shape to .notdef or have no ink of their own; reporting
+// them would drown the real tofu in noise.
+func issueSkipRune(r rune) bool {
+	if unicode.IsSpace(r) || unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
+		return true
+	}
+	if harfbuzz.IsDefaultIgnorable(r) {
+		return true
+	}
+	// Surrogates are not valid text runes; go-text cannot draw them by design.
+	return r >= 0xd800 && r <= 0xdfff
+}
+
+// reportMissingFonts reports one IssueMissingFont for every paragraph segment
+// whose resolved Style.FontFamily is set but has no face in the font set. It
+// runs on the break path only; drawing reuses the shaped result.
+func (w *textWorker) reportMissingFonts(p *paragraph) {
+	if w.issues == nil {
+		return
+	}
+	for si := range p.segs {
+		seg := &p.segs[si]
+		family := strings.TrimSpace(seg.style.FontFamily)
+		if family == "" || w.fs.HasFamily(family) {
+			continue
+		}
+		w.issues.add(IssueMissingFont, p.chapter, seg.node, "font family %q is not in the font set", family)
+	}
+}
+
+// missingGlyphSet collects the unique code points one node could not draw.
+type missingGlyphSet struct {
+	order []rune
+	seen  map[rune]struct{}
+}
+
+// add records one missing code point, keeping first-seen order for a stable
+// Detail string.
+func (s *missingGlyphSet) add(r rune) {
+	if s.seen == nil {
+		s.seen = make(map[rune]struct{}, 8)
+	}
+	if _, ok := s.seen[r]; ok {
+		return
+	}
+	s.seen[r] = struct{}{}
+	s.order = append(s.order, r)
+}
+
+// missingGlyphDetail formats at most maxMissingGlyphs code points plus how many
+// further unique code points were dropped, so a paragraph full of unsupported
+// text still produces a readable, bounded diagnostic.
+func missingGlyphDetail(runes []rune) string {
+	const maxMissingGlyphs = 8
+	var b strings.Builder
+	b.WriteString("missing glyphs for ")
+	n := len(runes)
+	if n > maxMissingGlyphs {
+		n = maxMissingGlyphs
+	}
+	for i := 0; i < n; i++ {
+		if i > 0 {
+			b.WriteByte(' ')
+		}
+		fmt.Fprintf(&b, "U+%04X", runes[i])
+	}
+	if extra := len(runes) - n; extra > 0 {
+		fmt.Fprintf(&b, " (+%d more code points)", extra)
+	}
+	return b.String()
+}
+
+// reportMissingGlyphs scans the shaped runs of a paragraph for .notdef glyphs
+// (GlyphID 0) and reports one IssueMissingGlyphs per paragraph segment node,
+// naming the code points no configured face could draw. It is called by
+// wrapParagraph, which shapes a whole paragraph once per layout; the per-line
+// drawing path shapes lines again and must not report duplicates.
+//
+// wrapText is the text that was shaped and origText the paragraph's own runes;
+// they differ when hyphenation inserted synthetic hyphens (origIndex maps a
+// wrap index back to the original rune, and wrapHyph marks the inserted ones).
+func (w *textWorker) reportMissingGlyphs(p *paragraph, wrapText, origText []rune, origIndex []int32, wrapHyph map[int32]struct{}, runs []shapedRun) {
+	if w.issues == nil {
+		return
+	}
+	// The maps are created on the first .notdef only: a clean paragraph, which
+	// is the overwhelmingly common case, pays one glyph scan and no allocation.
+	var sets map[NodeID]*missingGlyphSet
+	var order []NodeID
+	add := func(node NodeID, r rune) {
+		if sets == nil {
+			sets = make(map[NodeID]*missingGlyphSet, 1)
+		}
+		s := sets[node]
+		if s == nil {
+			s = &missingGlyphSet{}
+			sets[node] = s
+			order = append(order, node)
+		}
+		s.add(r)
+	}
+	for ri := range runs {
+		out := &runs[ri].out
+		for gi := range out.Glyphs {
+			g := &out.Glyphs[gi]
+			if g.GlyphID != 0 {
+				continue
+			}
+			// One glyph cluster may span several runes; every rune in it that
+			// is not a control/ignorable is genuinely missing.
+			n := g.RunesCount()
+			if n < 1 {
+				n = 1
+			}
+			for k := 0; k < n; k++ {
+				wi := g.TextIndex() + k
+				if wi < 0 || wi >= len(wrapText) {
+					continue
+				}
+				orig := wi
+				if origIndex != nil {
+					if _, synthetic := wrapHyph[int32(wi)]; synthetic {
+						continue
+					}
+					// origIndex[wi] is one past the original rune at wi; the
+					// last entry maps the end of the text.
+					orig = int(origIndex[wi]) - 1
+					if orig < 0 || orig >= len(origText) {
+						continue
+					}
+				}
+				r := origText[orig]
+				if issueSkipRune(r) {
+					continue
+				}
+				seg := p.segAt(orig)
+				if seg == nil {
+					continue
+				}
+				add(seg.node, r)
+			}
+		}
+	}
+	for _, node := range order {
+		w.issues.add(IssueMissingGlyphs, p.chapter, node, "%s", missingGlyphDetail(sets[node].order))
+	}
 }
 
 // shapeHyphen shapes a synthetic hyphen for a line that ended at an allowed
@@ -452,8 +699,11 @@ func (w *textWorker) wrapParagraph(
 	blockStyle Style,
 	defaultLang language.Language,
 ) ([]lineBox, error) {
+	// origText keeps the paragraph's own runes: hyphenation below replaces
+	// wrapText with a copy that also contains synthetic hyphens.
+	origText := w.paraText(p)
 	wrapPara := p
-	wrapText := w.paraText(p)
+	wrapText := origText
 	p.width = width
 	var (
 		origIndex []int32
@@ -467,7 +717,12 @@ func (w *textWorker) wrapParagraph(
 			wrapHyph = hyph
 		}
 	}
+	// Diagnostics belong to the break path: this is the one place that shapes
+	// the whole paragraph per layout, so a missing font or a .notdef glyph is
+	// reported once instead of once per drawn line.
+	w.reportMissingFonts(p)
 	runs := w.shapeRange(wrapPara, wrapText, 0, len(wrapText), defaultLang)
+	w.reportMissingGlyphs(p, wrapText, origText, origIndex, wrapHyph, runs)
 	if len(runs) == 0 {
 		return nil, nil
 	}
@@ -555,7 +810,7 @@ func (w *textWorker) wrapParagraph(
 				maxW = width - indent
 			}
 			if maxW <= 0 {
-				return nil, false, fmt.Errorf("%w: first-line indent leaves no line width", ErrInvalidOptions)
+				return nil, false, docErrorf(ErrInvalidOptions, "first-line indent leaves no line width")
 			}
 			wrapW := maxW
 			if pad > 0 && wrapW > pad {

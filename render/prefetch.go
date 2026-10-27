@@ -28,7 +28,10 @@ func (l *Layout) Prefetch(ctx context.Context, lo, hi int) error {
 		return ctx.Err()
 	}
 	scroll := l.opts.Mode == ModeScroll
-	l.engine.parallelFor(ctx, hi-lo, func(k int) {
+	// Page and Tile never cache a partial display list (a recovered internal
+	// error marks the page incomplete), so a failed prefetch leaves the cache
+	// consistent; the error still tells the host that the window is cold.
+	if err := l.engine.parallelFor(ctx, hi-lo, func(k int) {
 		if ctx.Err() != nil {
 			return
 		}
@@ -37,7 +40,9 @@ func (l *Layout) Prefetch(ctx context.Context, lo, hi int) error {
 			return
 		}
 		l.Page(lo + k)
-	})
+	}); err != nil {
+		return err
+	}
 	return ctx.Err()
 }
 
@@ -81,6 +86,9 @@ func (l *Layout) StartPrefetch(ctx context.Context, lo, hi int) *Prefetch {
 	p := &Prefetch{done: make(chan struct{})}
 	go func() {
 		defer close(p.done)
+		// This goroutine belongs to the library, so a panic here must not
+		// escape: it would take down the host with no way to recover.
+		defer recoverInto(&p.err)
 		p.err = l.Prefetch(ctx, lo, hi)
 	}()
 	return p

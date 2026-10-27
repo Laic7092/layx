@@ -45,6 +45,11 @@ type Border struct {
 // Zero values mean "use the document default" for font family, size, line
 // height, color and weight. Margins are absolute CSS pixels; zero means zero.
 //
+// Every float field must be finite. DocumentBuilder rejects NaN and infinities
+// with a *DocumentError wrapping ErrInvalidDocument, naming the StyleID and the
+// field; a non-finite value would otherwise reach page geometry and silently
+// corrupt the output instead of failing.
+//
 // Inherited typographic fields treat zero (or the zero enum, or false) as
 // "unset". That makes an explicit reset inexpressible: a child cannot cancel a
 // parent's FirstLineIndent, LetterSpacing, WordSpacing, Hyphenate, FontSlant or

@@ -1,21 +1,55 @@
-# 样书
+# Sample EPUB files
 
-联调用的真实 EPUB，公有领域文本，来自 Project Gutenberg。
+The `epub` tests read the `.epub` files in this directory. They are **not
+committed**: `.gitignore` ignores `epub/testdata/samples/*.epub`, and every test
+that needs a sample skips (instead of failing) when it is absent.
 
-| 文件 | 来源 | 覆盖什么 |
+## Which tests use this directory
+
+| Test or benchmark | Needs | What it checks |
 |---|---|---|
-| `aq-zhuan.epub` | [PG #25332](https://www.gutenberg.org/ebooks/25332) 鲁迅《阿Q正傳》 | 真实 EPUB 2：PNG 封面页（`wrap0000.html` 里只有 `<img>`）、Gutenberg 分块 HTML、NCX 目录 |
+| `TestSamplesOpen` | every `*.epub` here | Opens and converts each sample into a `render.Document`; catches a truncated or corrupt file before it confuses a manual test. Skips when the directory has no samples. |
+| `TestTOCOnRealSample` | `aq-zhuan.epub` | A real EPUB 2 whose NCX has seven entries, six pointing at fragments of one XHTML file. Checks table-of-contents order, nesting and resolved anchors. |
+| `BenchmarkOpenAQ`, `BenchmarkBuildAQ`, `BenchmarkLayoutAQ` | `aq-zhuan.epub` | Open, build and layout cost on a real book. |
 
-`TestSamplesOpen` 会逐个打开本目录下的 `.epub` 并 Build，所以截断的文件
-不会混进来。TXT 样书属于纯文本解析，不在 `layx/epub` 范围内。
+The real-book cases need an actual EPUB 2 saved here as `aq-zhuan.epub` (for
+example a public-domain book from Project Gutenberg); they skip when it is
+missing. Do not commit real books.
 
-这个目录里的 `.epub` **不提交**（`.gitignore` 已排除）。测试和基准在没有样书时
-会 skip，而不是失败。需要跑真实样书相关用例时，从兄弟仓库复制：
+## Generate the synthetic samples
+
+From the repository root:
 
 ```sh
-cp ../../../layx-reader/internal/book/testdata/samples/aq-zhuan.epub .
+go run ./tools/genepub
 ```
 
-`TestSamplesOpen` 会逐个打开本目录下的 `.epub`；`TestTOCOnRealSample`、
-`BenchmarkBuildAQ`、`BenchmarkOpenAQ`、`BenchmarkLayoutAQ` 只针对
-`aq-zhuan.epub`。
+From this module directory:
+
+```sh
+cd epub
+go run ../tools/genepub -out testdata/samples
+```
+
+`-out DIR` selects another output directory; the default is
+`epub/testdata/samples` relative to the repository root.
+
+The command writes two small files:
+
+- `layx-synthetic.epub` — three chapters plus a navigation document and an NCX,
+  a stylesheet with `@font-face` and `@page`, a table with `colspan`/`rowspan`, an
+  inline PNG, ruby annotations, a vector-only SVG and a MathML formula. Building
+  it exercises the dropped-content diagnostics.
+- `layx-clean.epub` — plain text and a list. Its diagnostic list is empty.
+
+The output is deterministic: zip entry order, entry timestamps and bytes are
+fixed, so a given Go release regenerates byte-identical files. The generator
+source is `tools/genepub/main.go`; change that instead of editing the generated
+`.epub` files by hand, then regenerate.
+
+Verify the samples with:
+
+```sh
+cd epub
+go test ./... -run TestSamplesOpen -count=1
+```

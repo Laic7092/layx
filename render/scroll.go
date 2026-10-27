@@ -25,6 +25,10 @@ type Tile struct {
 	height float32
 	ops    []drawOp
 	links  []Link
+	// incomplete marks a display list that a recovered panic or a failed
+	// parallel paint step cut short. Tile never caches such a tile; building it
+	// again is cheap compared to serving a half-drawn frame from the cache.
+	incomplete bool
 }
 
 // Index returns the tile number. Tile i covers content y
@@ -88,13 +92,20 @@ func (t *Tile) Links() []Link {
 //     its own root block margins.
 //   - Margins.Top/Bottom are page viewport insets and are not part of content
 //     coordinates. Margins.Left/Right still inset the tile display lists.
-func (l *Layout) initScroll() {
+//
+// For a ranged layout only the included chapters contribute height, so content
+// y starts at 0 at the first included chapter.
+//
+// initScroll enforces Limits.MaxTiles before allocating the tile cache: the
+// tile count is content height divided by TileHeight, and a tiny TileHeight can
+// otherwise turn a short book into millions of tile boxes.
+func (l *Layout) initScroll() error {
 	if l.opts.Mode != ModeScroll {
-		return
+		return nil
 	}
 	l.chapterTop = make([]float32, len(l.chapters))
 	var y float32
-	for ci := range l.chapters {
+	for ci := l.firstChapter; ci < l.lastChapter; ci++ {
 		l.chapterTop[ci] = y
 		y += l.chapters[ci].height
 	}
@@ -107,7 +118,11 @@ func (l *Layout) initScroll() {
 	if height > 0 && y > 0 {
 		l.tileCount = int(math.Ceil(float64(y) / float64(height)))
 	}
+	if maxTiles := l.engine.limits.MaxTiles; maxTiles > 0 && l.tileCount > maxTiles {
+		return docErrorf(ErrLimitExceeded, "tiles %d > limit %d", l.tileCount, maxTiles)
+	}
 	l.tileCache = make(map[int]*Tile)
+	return nil
 }
 
 // ContentHeight returns the scroll flow's total height in content pixels, or 0
@@ -157,7 +172,10 @@ func (l *Layout) Tile(i int) *Tile {
 		l.tileMu.Unlock()
 	}
 	t := l.buildTile(i)
-	if limit <= 0 {
+	if limit <= 0 || t.incomplete {
+		// A tile cut short by a recovered internal error must not enter the
+		// cache: the host would keep drawing a partial frame for every later
+		// request. It is returned once, and the next Tile(i) retries the build.
 		return t
 	}
 	l.tileMu.Lock()
@@ -202,9 +220,19 @@ func (l *Layout) Tiles(lo, hi int) []*Tile {
 		}
 		return out
 	}
-	l.engine.parallelFor(context.Background(), hi-lo, func(k int) {
+	// Tiles has no error return, so a recovered internal error must not leave
+	// nil entries for the caller to dereference. Workers stop claiming tasks
+	// after the first failure; rebuild the rest in place. Tile/buildTile recover
+	// internally (and do not cache incomplete results), so this cannot panic.
+	if err := l.engine.parallelFor(context.Background(), hi-lo, func(k int) {
 		out[k] = l.Tile(lo + k)
-	})
+	}); err != nil {
+		for k := range out {
+			if out[k] == nil {
+				out[k] = l.Tile(lo + k)
+			}
+		}
+	}
 	return out
 }
 
@@ -236,13 +264,25 @@ func touchInt(order []int, v int) []int {
 	return append(order, v)
 }
 
-func (l *Layout) buildTile(i int) *Tile {
+func (l *Layout) buildTile(i int) (t *Tile) {
 	if l.engine.measure {
 		defer l.engine.noteTile(time.Now())
 	}
 	top := float32(i) * l.tileHeight
 	bottom := top + l.tileHeight
-	t := &Tile{layout: l, index: i, top: top, height: l.tileHeight}
+	t = &Tile{layout: l, index: i, top: top, height: l.tileHeight}
+	// Building a display list shapes text; like every other internal step it
+	// must turn a bug into a broken tile rather than a host crash. The tile is
+	// marked incomplete so Tile does not cache it (see Tile.incomplete).
+	var buildErr error
+	defer func() {
+		if r := recover(); r != nil {
+			buildErr = internalErr(r)
+		}
+		if buildErr != nil {
+			t.incomplete = true
+		}
+	}()
 	if bg := l.opts.Typography.Background; !bg.Transparent() {
 		t.ops = append(t.ops, drawOp{
 			kind:  opFill,
@@ -252,14 +292,16 @@ func (l *Layout) buildTile(i int) *Tile {
 	}
 
 	// A tile may span two chapters: do not assume it belongs to one. The
-	// chapter array is sorted by content top, so start at the first chapter
+	// included chapters are sorted by content top, so start at the first one
 	// whose flow reaches into this tile.
-	ci := sort.Search(len(l.chapterTop), func(j int) bool {
-		return l.chapterTop[j]+l.chapters[j].height > top
+	first, last := l.firstChapter, l.lastChapter
+	ci := first + sort.Search(last-first, func(j int) bool {
+		ci := first + j
+		return l.chapterTop[ci]+l.chapters[ci].height > top
 	})
 	// Boxes are painted first, behind every chapter's text in this tile.
 	tileClip := paint.Rect{X: 0, Y: 0, Width: l.opts.Viewport.Width, Height: l.tileHeight}
-	for bx := ci; bx < len(l.chapters); bx++ {
+	for bx := ci; bx < last; bx++ {
 		ct := l.chapterTop[bx]
 		if ct >= bottom {
 			break
@@ -280,7 +322,7 @@ func (l *Layout) buildTile(i int) *Tile {
 		elems []tileElem
 	)
 	dx := l.opts.Margins.Left
-	for ; ci < len(l.chapters); ci++ {
+	for ; ci < last; ci++ {
 		ct := l.chapterTop[ci]
 		if ct >= bottom {
 			break
@@ -331,6 +373,11 @@ func (l *Layout) buildTile(i int) *Tile {
 	}
 	painter := l.newPainter(jobs)
 	defer painter.close()
+	if painter.err != nil {
+		// Parallel painting recovered a panic. Keep the tile out of the cache;
+		// the loop below still appends the lines that were built.
+		buildErr = painter.err
+	}
 	for i := range elems {
 		e := &elems[i]
 		if e.isOp {
@@ -348,15 +395,16 @@ func (l *Layout) buildTile(i int) *Tile {
 // chapterAtContentY returns the chapter whose range contains y. It clamps to
 // the first and last chapter for y outside the flow.
 func (l *Layout) chapterAtContentY(y float32) int {
-	if len(l.chapterTop) == 0 {
+	first, last := l.firstChapter, l.lastChapter
+	if first >= last {
 		return -1
 	}
-	j := sort.Search(len(l.chapterTop), func(i int) bool { return l.chapterTop[i] > y }) - 1
-	if j < 0 {
-		j = 0
+	j := first + sort.Search(last-first, func(i int) bool { return l.chapterTop[first+i] > y }) - 1
+	if j < first {
+		j = first
 	}
-	if j >= len(l.chapters) {
-		j = len(l.chapters) - 1
+	if j >= last {
+		j = last - 1
 	}
 	return j
 }
@@ -532,12 +580,14 @@ func (l *Layout) Progress(loc Location) (float32, bool) {
 	return p, true
 }
 
-// HitTest maps a content coordinate to a document location. It is available in
-// both modes and uses the same content coordinates as LocationAt/OffsetOf.
+// HitTest maps a content point to a document location. It is available in both
+// modes and uses the same content coordinates as LocationAt/OffsetOf.
 //
-// x is measured from the content box's left edge (page Margins.Left excluded),
-// matching Page.HitTest's page-local coordinate after margins.
-func (l *Layout) HitTest(x, y float32) (Location, bool) {
+// pt.X is measured from the content box's left edge (page Margins.Left
+// excluded), matching Page.HitTest's page-local coordinate after margins;
+// pt.Y is the content y used by LocationAt and OffsetOf.
+func (l *Layout) HitTest(pt paint.Point) (Location, bool) {
+	x, y := pt.X, pt.Y
 	if l.opts.Mode == ModeScroll {
 		ci := l.chapterAtContentY(y)
 		if ci < 0 {

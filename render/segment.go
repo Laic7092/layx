@@ -3,6 +3,7 @@ package render
 import (
 	"unicode"
 
+	"github.com/go-text/typesetting/di"
 	"github.com/go-text/typesetting/harfbuzz"
 	"github.com/go-text/typesetting/language"
 	"github.com/go-text/typesetting/shaping"
@@ -60,17 +61,118 @@ type delimEntry struct {
 	script language.Script
 }
 
+// isBidiParagraphSeparator reports whether r is a paragraph separator for the
+// Unicode bidirectional algorithm (Bidi_Class B): LF, CR, U+001C..U+001E,
+// U+0085 and U+2029. A CRLF pair is one separator; splitComplex treats it as
+// such.
+func isBidiParagraphSeparator(r rune) bool {
+	switch r {
+	case '\n', '\r', 0x1c, 0x1d, 0x1e, 0x85, 0x2029:
+		return true
+	}
+	return false
+}
+
 // splitInput segments one shaping input by script and then by face. It returns
 // a slice owned by the worker, valid until the next call on the same worker.
 //
 // Text that may need bidi reordering or complex-script splitting is delegated
-// to the full shaping.Segmenter, which is always correct but allocates.
+// to the full shaping.Segmenter, which is always correct but allocates. The
+// segmenter's text is split at bidi paragraph separators first: UAX #9 defines
+// one paragraph per separator-terminated run, and go-text's Segmenter stops its
+// bidi analysis at the first separator, returning runs covering only the text
+// before it. Feeding whole multi-paragraph text nodes to Split therefore used to
+// leave the tail unshaped (audit §2.1). Calling Split per fragment both matches
+// the standard and keeps coverage total; the separator rune stays in exactly one
+// run, so every source rune has a glyph cluster and line breaking can map rune
+// offsets.
 func (w *textWorker) splitInput(in shaping.Input, fm shaping.Fontmap) []shaping.Input {
-	if in.RunStart >= in.RunEnd || !w.ltrSimple(in.Text[in.RunStart:in.RunEnd]) {
-		return w.segmenter.Split(in, fm)
+	if in.RunStart >= in.RunEnd {
+		return nil
+	}
+	if !w.ltrSimple(in.Text[in.RunStart:in.RunEnd]) {
+		return w.splitComplex(in, fm)
 	}
 	runs := w.splitByScript(in)
 	return w.splitByFace(runs, fm)
+}
+
+// splitComplex runs the full segmenter over each bidi paragraph of in. The runs
+// it returns cover exactly [in.RunStart, in.RunEnd): Split's result is copied
+// out of the segmenter-owned buffer before the next call (each call reuses and
+// invalidates it), and any hole is filled with a plain LTR run over the gap so a
+// caller never sees a short list even if the segmenter misbehaves on hostile
+// input.
+func (w *textWorker) splitComplex(in shaping.Input, fm shaping.Fontmap) []shaping.Input {
+	w.bidiRuns = w.bidiRuns[:0]
+	covered := in.RunStart
+	for fragStart := in.RunStart; fragStart < in.RunEnd; {
+		fragEnd := fragStart
+		for fragEnd < in.RunEnd {
+			r := in.Text[fragEnd]
+			fragEnd++
+			if isBidiParagraphSeparator(r) {
+				// CRLF is a single separator: keep the pair in one fragment
+				// rather than starting the next one with a stray LF.
+				if r == '\r' && fragEnd < in.RunEnd && in.Text[fragEnd] == '\n' {
+					fragEnd++
+				}
+				break
+			}
+		}
+		frag := in
+		frag.RunStart, frag.RunEnd = fragStart, fragEnd
+		pieces := w.segmenter.Split(frag, fm)
+		for pi := range pieces {
+			// Copy the Input: pieces points into the segmenter, and the next
+			// Split call overwrites it.
+			run := pieces[pi]
+			if run.RunStart < covered {
+				run.RunStart = covered
+			}
+			if run.RunStart >= in.RunEnd || run.RunEnd <= run.RunStart {
+				continue
+			}
+			if run.RunEnd > in.RunEnd {
+				run.RunEnd = in.RunEnd
+			}
+			if run.RunStart > covered {
+				w.appendFallbackRun(in, covered, run.RunStart, fm)
+			}
+			w.bidiRuns = append(w.bidiRuns, run)
+			if run.RunEnd > covered {
+				covered = run.RunEnd
+			}
+		}
+		if covered < fragEnd {
+			w.appendFallbackRun(in, covered, fragEnd, fm)
+			covered = fragEnd
+		}
+		fragStart = fragEnd
+	}
+	if covered < in.RunEnd {
+		w.appendFallbackRun(in, covered, in.RunEnd, fm)
+	}
+	return w.bidiRuns
+}
+
+// appendFallbackRun adds a plain LTR run for [lo, hi) shaped with the fallback
+// face. It is only used when segmentation failed to cover the input; the run
+// goes to the shaper like any other, so its glyph clusters still cover the
+// gap's runes.
+func (w *textWorker) appendFallbackRun(in shaping.Input, lo, hi int, fm shaping.Fontmap) {
+	if lo >= hi {
+		return
+	}
+	run := in
+	run.RunStart, run.RunEnd = lo, hi
+	run.Direction = di.DirectionLTR
+	run.Script = language.Common
+	run.Face = w.faces[0]
+	if fm != nil {
+		run.Face = fm.ResolveFace(in.Text[lo])
+	}
+	w.bidiRuns = append(w.bidiRuns, run)
 }
 
 // ltrSimple reports whether text can be shaped as LTR without bidi analysis.
