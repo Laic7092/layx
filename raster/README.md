@@ -1,6 +1,7 @@
-# layx-raster
+# layx/raster
 
-[layx](https://github.com/laix/layx) 的纯 Go 软件光栅器。输入是 layx 已经排版好的显示列表
+[`layx`](../README.md) 的纯 Go 软件光栅器，独立 module（`github.com/laix/layx/raster`，
+tags `raster/v0.x.y`），与 [`epub`](../epub) 同级。输入是 layx 已经排版好的显示列表
 （`render.Page` / `render.Tile`），输出是 `*image.RGBA`。
 
 layx 核心刻意**不内置光栅器**：它只产出 `paint.Painter` 调用序列，字形 ID、位置、颜色都由
@@ -8,7 +9,7 @@ shaping 和布局决定。本仓库补上缺的那一半——覆盖率计算和
 e-ink 驱动、没有 GPU 的宿主都能直接跑，而不必再写一个 Canvas/OPENGL 后端。
 
 ```text
-layx                          layx-raster
+layx                          layx/raster
 Document → 布局 → DisplayList → paint.Painter
                                         ↓
                               覆盖率扫描线 / 裁剪掩码 / 混合
@@ -20,7 +21,7 @@ Document → 布局 → DisplayList → paint.Painter
 
 ```go
 import (
-    "github.com/laix/layx-raster"
+    "github.com/laix/layx/raster"
     "github.com/laix/layx/render/paint"
 )
 
@@ -37,6 +38,7 @@ png.Encode(w, r.Image())
 命令行示例（排版一段文本并输出第 N 页 PNG）：
 
 ```sh
+cd raster
 go run ./cmd/layx-shot -font book.ttf -text chapter.txt -page 0 -out page.png
 ```
 
@@ -103,7 +105,7 @@ FreeType 2.13.2、wqy-microhei、34 px（17 DIP @ DPR 2）、《阿Q正傳》第
 
 | | 每字形冷栅格 | 同一页（474 字形） | 与 16×16 点采样真值的平均误差 | 墨量/真值 |
 | --- | ---: | ---: | ---: | ---: |
-| layx-raster | **3.4 µs** | **1.9 ms**（含纸面与墨色修正） | **0.085/255** | 1.0022 |
+| layx/raster | **3.4 µs** | **1.9 ms**（含纸面与墨色修正） | **0.085/255** | 1.0022 |
 | FreeType | 5.0 µs | 3.3–3.6 ms（只有栅格与混合） | 0.122/255 | 1.0049 |
 
 误差更小不是调出来的：精确面积积分对的是面积，FreeType 的灰度光栅器是 4×4 子采样。
@@ -126,7 +128,7 @@ FreeType 2.13.2、wqy-microhei、34 px（17 DIP @ DPR 2）、《阿Q正傳》第
 ## 包结构
 
 ```text
-layx-raster/
+raster/                         嵌套 module `github.com/laix/layx/raster`
   raster.go       Rasterizer、表面、状态栈、矩形/描边/圆角填充
   clip.go         裁剪的快速路径与覆盖率掩码，Visible
   geometry.go     仿射、box→device、扁平化（二次/三次贝塞尔）、shape
@@ -139,13 +141,14 @@ layx-raster/
   testdata/       DejaVu Serif（测试字体，Bitstream Vera 许可，见 testdata/DejaVu-LICENSE.txt）
 ```
 
-直接依赖只有 `github.com/laix/layx`（`replace` 到本地 `../layx`）和
+直接依赖只有 `github.com/laix/layx`（`replace` 到上层 `../`）和
 `github.com/go-text/typesetting`（字体轮廓）。`golang.org/x/image` 是 layx 的间接依赖，
 本包自己不用它；也没有 cgo。
 
 ## 测试
 
 ```sh
+cd raster
 go test ./...
 go run ./cmd/layx-shot -font testdata/DejaVuSerif.ttf -out /tmp/page.png
 

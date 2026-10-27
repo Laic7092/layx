@@ -1,5 +1,5 @@
 // Command layx-shot lays out a plain text file with layx and rasterizes one
-// page to a PNG. It is the smallest end-to-end example of layx + layx-raster.
+// page to a PNG. It is the smallest end-to-end example of layx + layx/raster.
 //
 //	layx-shot -font book.ttf -text chapter.txt -page 0 -out page.png
 package main
@@ -13,7 +13,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/laix/layx-raster"
+	"github.com/laix/layx/raster"
 	"github.com/laix/layx/render"
 	"github.com/laix/layx/render/paint"
 )

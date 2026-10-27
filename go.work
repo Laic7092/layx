@@ -2,19 +2,22 @@ go 1.26.0
 
 // The repository is a multi-module workspace:
 //
-//   - .      — github.com/laix/layx (the render library)
-//   - ./epub — github.com/laix/layx/epub (the EPUB loader, depends on the root module)
+//   - .       — github.com/laix/layx (the render library)
+//   - ./epub  — github.com/laix/layx/epub (the EPUB loader, depends on the root module)
+//   - ./raster — github.com/laix/layx/raster (the software rasterizer, depends on the root module)
 //
 // A committed go.work lets `go build ./...` / `go test ./...` resolve
 // github.com/laix/layx from this checkout instead of a published version.
 // External consumers do not see go.work: they resolve the module through the
-// released tags (v0.x.y for the root module, epub/v0.x.y for the nested one).
+// released tags (v0.x.y for the root module, epub/v0.x.y and raster/v0.x.y for
+// the nested ones).
 use (
 	.
 	./epub
+	./raster
 )
 
-// The nested module requires github.com/laix/layx v0.1.0, which is not
+// The nested modules require github.com/laix/layx v0.1.0, which is not
 // published yet. A version-specific replace makes the go command resolve that
 // requirement to this checkout instead of fetching it over VCS (an all-version
 // replace of a workspace module is rejected). External consumers ignore this

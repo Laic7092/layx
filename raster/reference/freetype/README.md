@@ -1,6 +1,6 @@
 # FreeType：同一份工作的参照
 
-这三个 C 文件不是 `layx-raster` 的依赖，也不参与任何构建。它们是尺子：
+这三个 C 文件不是 `layx/raster` 的依赖，也不参与任何构建。它们是尺子：
 同一字体、同一字号、同一批字形，用平台自己的光栅器（FreeType 的灰度模式）
 做一遍，好让「我们的速度与画质」是一个可以复查的数字，而不是一句自评。
 
@@ -24,14 +24,14 @@ cc -O2 -o ftdump  ftdump.c  $(pkg-config --cflags --libs freetype2)
 
 ## 量出来的是什么
 
-`layx-raster` 的对照项是仓库里的 `BenchmarkGlyphRasterizer`、
+`layx/raster` 的对照项是仓库里的 `BenchmarkGlyphRasterizer`、
 `BenchmarkPageRender`（在 `layx-reader` 里）与 `TestGlyphFidelity`。
 2026-10-26，本机（amd64，Go 1.24，FreeType 2.13.2），字体 wqy-microhei，
 《阿Q正傳》第 5 页：474 个字形实例、216 个不同 gid、34 px（17 DIP @ DPR 2）。
 
 | | 每字形冷栅格 | 同一页（474 字形） | 与 16×16 点采样真值 | 墨量/真值 |
 | --- | ---: | ---: | ---: | ---: |
-| layx-raster | **3.4 µs** | **1.9 ms**（含纸面与墨色修正） | **0.085/255** | 1.0022 |
+| layx/raster | **3.4 µs** | **1.9 ms**（含纸面与墨色修正） | **0.085/255** | 1.0022 |
 | FreeType | 5.0 µs | 3.3–3.6 ms（只有栅格与混合） | 0.122/255 | 1.0049 |
 
 两件事值得说明：
@@ -49,7 +49,7 @@ cc -O2 -o ftdump  ftdump.c  $(pkg-config --cflags --libs freetype2)
 ```sh
 awk '{print $1}' runs.txt | sort -u > gids.txt     # 任意页码的字形 id
 ./ftbench /usr/share/fonts/truetype/wqy/wqy-microhei.ttc 34 gids.txt 40
-go test -run XXX -bench BenchmarkGlyphRasterizer -benchtime 2s .   # 在 layx-raster
+go test -run XXX -bench BenchmarkGlyphRasterizer -benchtime 2s .   # 在 raster/
 ```
 
 画质对真值：

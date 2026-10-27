@@ -43,11 +43,12 @@ module **Go 1.26**（`golang.org/x/net` 的要求）。仓库提交了 `go.work`
 克隆后一条 Go 1.26+ 工具链即可开发：
 
 ```sh
-go test ./...              # 根 module（workspace 模式）
-(cd epub && go test ./...) # epub module
+go test ./...                # 根 module（workspace 模式）
+(cd epub && go test ./...)   # epub module
+(cd raster && go test ./...) # 光栅器 module
 ```
 
-外部消费者看不到 `go.work`，解析的是上面两个已发布的 module 版本。
+外部消费者看不到 `go.work`，解析的是上面三个已发布的 module 版本。
 
 ## 包结构
 
@@ -56,6 +57,7 @@ github.com/laix/layx/render            核心：IR、字体、布局、分页、
 github.com/laix/layx/render/paint      绘制接口与基础类型（无光栅器）
 github.com/laix/layx/render/hyphen/en  可选：TeX 英文断字模式，核心不 import 它
 github.com/laix/layx/epub              EPUB/XHTML/CSS → render.Document（nested module）
+github.com/laix/layx/raster            paint.Painter → *image.RGBA，纯 Go 软件光栅器（nested module）
 examples/layout                        最小示例：排版并打印页数
 examples/wasm                          wasm + Canvas 2D 原型（含 bench 路径）
 tools/{bench_native,memreport,snapshotimg,genepub}  开发工具，不属于库
@@ -64,7 +66,7 @@ tools/{bench_native,memreport,snapshotimg,genepub}  开发工具，不属于库
 API 参考见 [`docs/api.md`](docs/api.md)：越界与空结果的统一语义、`IssueCode` 表、
 `Limits` 默认值、错误分类、`FontSet` 覆盖查询与 `LayoutRange` 语义。
 
-`epub/` 有自己的 `go.mod` 和 [`epub/README.md`](epub/README.md)，不在根 `go test ./...` 里。
+`epub/` 与 `raster/` 各自有自己的 `go.mod`、`README.md`，不在根 `go test ./...` 里。
 直接依赖只有 `go-text/typesetting`（shaping / UAX #14 断行）与 `golang.org/x/image/math/fixed`；
 `go list -deps ./render` 里的 `image/*`、`encoding/xml` 是 `go-text/typesetting/font` 带进来的
 传递依赖。`render/deps_test.go` 对**直接 import** 做了闸门。

@@ -5,8 +5,23 @@ All notable changes to this project are documented here. The format follows
 [Semantic Versioning](https://semver.org/) with the usual pre-1.0 caveat: minor
 releases may contain breaking changes (see `CONTRIBUTING.md`).
 
-The `render` and `epub` modules are versioned together: `v0.1.0` tags the root
-module and `epub/v0.1.0` tags the nested one. Upgrade them in lockstep.
+The `render`, `epub` and `raster` modules are versioned together: `v0.1.0` tags
+the root module, `epub/v0.1.0` and `raster/v0.1.0` tag the nested ones. Upgrade
+them in lockstep.
+
+## [Unreleased]
+
+### Added
+
+- **`raster/` — `github.com/laix/layx/raster`, the reference software rasterizer**
+  (tags `raster/v0.x.y`), now a nested module at the same level as `epub/`.
+  It implements `paint.Painter` into an `*image.RGBA` with exact-area coverage
+  integration, clipping masks, glyph outlines and the ink `Tone` curve, so a
+  host without a GPU — CI, a server, an e-ink driver, a snapshot test — can
+  turn a display list into pixels without a Canvas or OpenGL backend. No new
+  dependencies: it uses the `go-text/typesetting` and `golang.org/x/image` the
+  root module already requires, and no cgo. The core stays pixel-free;
+  `render/deps_test.go` now forbids `render` from importing it.
 
 ## [0.1.0] — 2026-10-27
 

@@ -116,7 +116,7 @@ func main() {
 		if !ok {
 			continue
 		}
-		label := "layx-raster"
+		label := "layx/raster"
 		if name == "ft" {
 			label = "freetype"
 		}
