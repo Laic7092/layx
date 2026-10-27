@@ -363,7 +363,13 @@ func (l *Layout) chapterAtContentY(y float32) int {
 
 // itemAt returns the item containing y in a chapter's content coordinates.
 // first/last bound the search (all items for scroll, one page for paged).
-func itemAt(cf *chapterFlow, first, last int, y float32) int {
+//
+// tol is the rounding slack a y taken from OffsetOf may carry: the content
+// coordinate is summed at book scale and subtracted again here, so a value that
+// names an item's top edge can land a float32 ulp below it. Only a gap larger
+// than that slack belongs to the line above; treating rounding as a gap made
+// LocationAt(OffsetOf(loc)) return the previous line on long books.
+func itemAt(cf *chapterFlow, first, last int, y, tol float32) int {
 	total := cf.count()
 	first = clampInt(first, 0, total)
 	last = clampInt(last, first, total)
@@ -371,17 +377,31 @@ func itemAt(cf *chapterFlow, first, last int, y float32) int {
 		return -1
 	}
 	n := last - first
+	// Search with the slack folded in: a y that names an item's top can land a
+	// rounding error below the previous line's bottom, and then a plain
+	// `bottom > y` search would stop on the previous line.
 	k := sort.Search(n, func(i int) bool {
-		return cf.itemBottom(first+i) > y
+		return cf.itemBottom(first+i) > y+tol
 	})
 	if k >= n {
 		k = n - 1
 	}
 	idx := first + k
-	if idx > first && cf.ys[idx] > y {
+	if idx > first && cf.ys[idx] > y && cf.ys[idx]-y > tol {
 		idx--
 	}
 	return idx
+}
+
+// contentSlack is the float32 rounding slack of a content y that is converted
+// to a chapter-local y and back. OffsetOf adds the chapter (or page slot) base
+// and LocationAt subtracts it, so an item top can come back two ulps low at the
+// magnitude of the whole-book coordinate. The floor keeps small layouts exact.
+func contentSlack(y float32) float32 {
+	if y < 0 {
+		y = -y
+	}
+	return y*(2.0/(1<<23)) + 1e-3
 }
 
 // LocationAt maps a book content y to the nearest line (or image) location.
@@ -403,7 +423,7 @@ func (l *Layout) LocationAt(y float32) (Location, bool) {
 			return Location{}, false
 		}
 		cf := &l.chapters[ci]
-		idx := itemAt(cf, 0, cf.count(), y-l.chapterTop[ci])
+		idx := itemAt(cf, 0, cf.count(), y-l.chapterTop[ci], contentSlack(y))
 		if idx < 0 {
 			return Location{}, false
 		}
@@ -414,7 +434,7 @@ func (l *Layout) LocationAt(y float32) (Location, bool) {
 		return Location{}, false
 	}
 	cf := &l.chapters[info.chapter]
-	idx := itemAt(cf, info.first, info.last, info.top+local)
+	idx := itemAt(cf, info.first, info.last, info.top+local, contentSlack(y))
 	if idx < 0 {
 		return Location{}, false
 	}

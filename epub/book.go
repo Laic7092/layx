@@ -201,7 +201,10 @@ func openEPUB(file string) (*Book, error) {
 		seen[it.href] = true
 		data, err := read(it.href)
 		if err != nil {
-			return nil, err
+			// One unreadable spine item (a missing file, a bad zip entry)
+			// must not cost the reader the rest of the book. If every item
+			// fails the empty-check below reports it.
+			continue
 		}
 		title := tocTitles[it.href]
 		if title == "" {

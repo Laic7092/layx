@@ -179,7 +179,16 @@ func readFile(files map[string]*zip.File, name string, limit int64) ([]byte, err
 	if limit <= 0 {
 		return io.ReadAll(rc)
 	}
-	return io.ReadAll(io.LimitReader(rc, limit))
+	// Read one byte past the cap so a larger entry is rejected instead of
+	// silently truncated into a half image or a half package document.
+	data, err := io.ReadAll(io.LimitReader(rc, limit+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > limit {
+		return nil, fmt.Errorf("epub: %s is larger than %d bytes", name, limit)
+	}
+	return data, nil
 }
 
 // mediaType returns the manifest's media type for an archive path, or "".

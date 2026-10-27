@@ -418,6 +418,15 @@ func TestPositionRoundTripBothModes(t *testing.T) {
 					if !closef(y, y2, 0.01) {
 						t.Fatalf("chapter %d item %d: y %.6f round-tripped to %.6f", ci, idx, y, y2)
 					}
+					// Rounding a content y back to a line must not turn an exact
+					// line top into the previous line's top.
+					back, ok := l.LocationAt(y)
+					if !ok {
+						t.Fatalf("chapter %d item %d: LocationAt(%v) failed", ci, idx, y)
+					}
+					if back.Chapter != loc.Chapter || back.Node != loc.Node || back.Offset != loc.Offset {
+						t.Fatalf("chapter %d item %d: %+v at y %.6f came back as %+v", ci, idx, loc, y, back)
+					}
 				}
 			}
 		})
