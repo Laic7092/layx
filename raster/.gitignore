@@ -13,3 +13,8 @@ coverage.html
 # Rendered output from cmd/layx-shot
 *.png
 !testdata/*.png
+
+# Built C tools from reference/freetype (see its README)
+reference/freetype/ftbench
+reference/freetype/ftpage
+reference/freetype/ftdump
