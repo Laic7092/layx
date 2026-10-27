@@ -650,11 +650,13 @@ func (t *paraTask) setLines(lines []lineBox) {
 	t.lines = make([]lineBreak, len(lines))
 	for li := range lines {
 		ln := &lines[li]
+		// ln.ascent and ln.descent are CSS pixels; lineBreak keeps the
+		// shaper's 1/64 px, which lineMetrics divides back out.
 		t.lines[li] = lineBreak{
 			end:            ln.end,
 			width:          ln.width,
-			ascent:         clampF16(ln.ascent),
-			descent:        clampF16(ln.descent),
+			ascent:         clampF16(ln.ascent * 64),
+			descent:        clampF16(ln.descent * 64),
 			implicitSize:   ln.implicitSize,
 			explicitHeight: ln.explicitHeight,
 		}

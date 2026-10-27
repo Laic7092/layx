@@ -163,6 +163,42 @@ func TestSelectionQuadsMatchFlow(t *testing.T) {
 	}
 }
 
+// TestLineBaselineFollowsTheFontAscent pins a line's baseline to the shaper's
+// extents rather than the middle of its box. The break data keeps ascent and
+// descent in 1/64 px (lineBreak), and a host derives both the highlight
+// rectangles and the hit-test boxes from the line box: when the ascent is lost,
+// the baseline falls to height/2, the glyphs are drawn above the box that is
+// supposed to contain them, and a selection paints beside the type instead of
+// over it. Real faces are far from symmetric around the baseline, so an
+// asymmetric box is what proves the ascent survived.
+func TestLineBaselineFollowsTheFontAscent(t *testing.T) {
+	doc := multiChapterDoc(t, 1)
+	opts := scrollOptions(t, ModePaged, 0)
+	l := layoutOptions(t, mustEngine(t, 2), doc, opts)
+	cf := &l.chapters[0]
+	items := itemsOf(cf)
+	size := opts.Typography.FontSize
+	checked := 0
+	for i := range items {
+		it := &items[i]
+		if it.kind != itemLine {
+			continue
+		}
+		slack := it.baseline - it.height/2
+		if slack < 0.15*size || slack > 0.6*size {
+			t.Fatalf("line %d: baseline %v sits %v from the middle of its %v box, want the font's ascent",
+				i, it.baseline, slack, it.height)
+		}
+		checked++
+		if checked == 8 {
+			break
+		}
+	}
+	if checked == 0 {
+		t.Fatal("the test document produced no lines")
+	}
+}
+
 // TestSelectionContentMatchesOffsetOf checks the documented contract: the
 // content rect of a single-line selection starts where OffsetOf reports.
 func TestSelectionContentMatchesOffsetOf(t *testing.T) {

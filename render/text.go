@@ -987,9 +987,9 @@ func clampInt(v, lo, hi int) int {
 	return v
 }
 
-// clampF16 narrows a metric to the range lineBreak stores. Line bounds are
-// within a few hundred pixels in practice; clamping keeps a pathological font
-// from wrapping around.
+// clampF16 narrows a metric in 1/64 px to the range lineBreak stores, which
+// caps a line bound at 512 px. Line bounds are within a few hundred pixels in
+// practice; clamping keeps a pathological font from wrapping around.
 func clampF16(v float32) int16 {
 	if v > 32767 {
 		return 32767
