@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/laix/layx/render"
 	"github.com/laix/layx/render/paint"
@@ -1027,7 +1028,16 @@ func containsBlock(n *hnode) bool {
 
 // collapseSpace collapses runs of white space and reports whether the run had
 // a leading or trailing space.
+//
+// Text nodes are most of what a book is made of, and the usual node is already
+// collapsed: a paragraph whose white space consists of single spaces, or of the
+// indentation and newlines the markup puts around it. Those are answered with a
+// slice of s rather than a copy built rune by rune, which is 18 MB of resident
+// heap for a 6.7 MB novel and grows with the book.
 func collapseSpace(s string) (out string, leading, trailing bool) {
+	if lo, hi, ok := collapsedSpan(s); ok {
+		return s[lo:hi], lo > 0, hi < len(s)
+	}
 	var b strings.Builder
 	inSpace := false
 	started := false
@@ -1048,4 +1058,48 @@ func collapseSpace(s string) (out string, leading, trailing bool) {
 		started = true
 	}
 	return b.String(), leading, inSpace
+}
+
+// collapsedSpan reports the byte range of s that collapsing keeps, and whether
+// that range is what collapsing produces because it has nothing to rewrite:
+// white space may lead, trail, or sit inside as single spaces, and nothing else.
+// Invalid UTF-8 is rejected: the rune-by-rune path replaces every stray byte
+// with U+FFFD, so the two would not agree.
+func collapsedSpan(s string) (lo, hi int, ok bool) {
+	hi = len(s)
+	for lo < hi {
+		r, n := utf8.DecodeRuneInString(s[lo:hi])
+		if r == utf8.RuneError && n <= 1 {
+			return 0, 0, false
+		}
+		if !unicode.IsSpace(r) {
+			break
+		}
+		lo += n
+	}
+	for hi > lo {
+		r, n := utf8.DecodeLastRuneInString(s[lo:hi])
+		if !unicode.IsSpace(r) {
+			break
+		}
+		hi -= n
+	}
+	prevSpace := false
+	for i := lo; i < hi; {
+		r, n := utf8.DecodeRuneInString(s[i:hi])
+		if r == utf8.RuneError && n <= 1 {
+			return 0, 0, false
+		}
+		if unicode.IsSpace(r) {
+			// A tab, a newline or a second space in a row has to be rewritten.
+			if r != ' ' || prevSpace {
+				return 0, 0, false
+			}
+			prevSpace = true
+		} else {
+			prevSpace = false
+		}
+		i += n
+	}
+	return lo, hi, true
 }
