@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/laix/layx/render/paint"
+	"github.com/laic7092/layx/render/paint"
 )
 
 // TestLineBoxes writes every line box of a corpus to a file, so scripts/linecmp.sh

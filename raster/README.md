@@ -1,6 +1,6 @@
 # layx/raster
 
-[`layx`](../README.md) 的纯 Go 软件光栅器，独立 module（`github.com/laix/layx/raster`，
+[`layx`](../README.md) 的纯 Go 软件光栅器，独立 module（`github.com/laic7092/layx/raster`，
 tags `raster/v0.x.y`），与 [`epub`](../epub) 同级。输入是 layx 已经排版好的显示列表
 （`render.Page` / `render.Tile`），输出是 `*image.RGBA`。
 
@@ -21,8 +21,8 @@ Document → 布局 → DisplayList → paint.Painter
 
 ```go
 import (
-    "github.com/laix/layx/raster"
-    "github.com/laix/layx/render/paint"
+    "github.com/laic7092/layx/raster"
+    "github.com/laic7092/layx/render/paint"
 )
 
 page := layout.Page(0)
@@ -43,7 +43,7 @@ go run ./cmd/layx-shot -font book.ttf -text chapter.txt -page 0 -out page.png
 ```
 
 `cmd/layx-shot` 只做三件事：把纯文本切成段落建 `render.Document`、用 `render.Engine`
-排版、把一页画进 PNG。EPUB/XHTML/CSS 仍然由 `github.com/laix/layx/epub` 负责。
+排版、把一页画进 PNG。EPUB/XHTML/CSS 仍然由 `github.com/laic7092/layx/epub` 负责。
 
 ## 已实现
 
@@ -128,7 +128,7 @@ FreeType 2.13.2、wqy-microhei、34 px（17 DIP @ DPR 2）、《阿Q正傳》第
 ## 包结构
 
 ```text
-raster/                         嵌套 module `github.com/laix/layx/raster`
+raster/                         嵌套 module `github.com/laic7092/layx/raster`
   raster.go       Rasterizer、表面、状态栈、矩形/描边/圆角填充
   clip.go         裁剪的快速路径与覆盖率掩码，Visible
   geometry.go     仿射、box→device、扁平化（二次/三次贝塞尔）、shape
@@ -141,7 +141,7 @@ raster/                         嵌套 module `github.com/laix/layx/raster`
   testdata/       DejaVu Serif（测试字体，Bitstream Vera 许可，见 testdata/DejaVu-LICENSE.txt）
 ```
 
-直接依赖只有 `github.com/laix/layx`（`replace` 到上层 `../`）和
+直接依赖只有 `github.com/laic7092/layx`（`replace` 到上层 `../`）和
 `github.com/go-text/typesetting`（字体轮廓）。`golang.org/x/image` 是 layx 的间接依赖，
 本包自己不用它；也没有 cgo。
 

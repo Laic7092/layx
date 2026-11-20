@@ -4,7 +4,7 @@ import (
 	"hash/maphash"
 	"math"
 
-	"github.com/laix/layx/render/paint"
+	"github.com/laic7092/layx/render/paint"
 )
 
 // keyHash is a 128-bit digest. Two independent 64-bit words keep accidental

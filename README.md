@@ -1,7 +1,7 @@
 # layx
 
 [![CI](https://github.com/Laic7092/layx/actions/workflows/ci.yml/badge.svg)](https://github.com/Laic7092/layx/actions/workflows/ci.yml)
-[![Go Reference](https://pkg.go.dev/badge/github.com/laix/layx/render.svg)](https://pkg.go.dev/github.com/laix/layx/render)
+[![Go Reference](https://pkg.go.dev/badge/github.com/laic7092/layx/render.svg)](https://pkg.go.dev/github.com/laic7092/layx/render)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 **中文** · [English](README.en.md)
@@ -31,8 +31,8 @@ XHTML / 选择器 / 级联                ↓
 两个 module 独立发布，按需 `go get`：
 
 ```sh
-go get github.com/laix/layx/render@v0.1.0    # 排版内核（必需）
-go get github.com/laix/layx/epub@v0.1.0      # EPUB/XHTML/CSS 解析层（可选）
+go get github.com/laic7092/layx/render@v0.1.0    # 排版内核（必需）
+go get github.com/laic7092/layx/epub@v0.1.0      # EPUB/XHTML/CSS 解析层（可选）
 ```
 
 `epub` 是 nested module，tag 形如 `epub/v0.x.y`；它 `require` 根 module 的**已发布版本**，
@@ -53,11 +53,11 @@ go test ./...                # 根 module（workspace 模式）
 ## 包结构
 
 ```text
-github.com/laix/layx/render            核心：IR、字体、布局、分页、命中、选区
-github.com/laix/layx/render/paint      绘制接口与基础类型（无光栅器）
-github.com/laix/layx/render/hyphen/en  可选：TeX 英文断字模式，核心不 import 它
-github.com/laix/layx/epub              EPUB/XHTML/CSS → render.Document（nested module）
-github.com/laix/layx/raster            paint.Painter → *image.RGBA，纯 Go 软件光栅器（nested module）
+github.com/laic7092/layx/render            核心：IR、字体、布局、分页、命中、选区
+github.com/laic7092/layx/render/paint      绘制接口与基础类型（无光栅器）
+github.com/laic7092/layx/render/hyphen/en  可选：TeX 英文断字模式，核心不 import 它
+github.com/laic7092/layx/epub              EPUB/XHTML/CSS → render.Document（nested module）
+github.com/laic7092/layx/raster            paint.Painter → *image.RGBA，纯 Go 软件光栅器（nested module）
 examples/layout                        最小示例：排版并打印页数
 examples/wasm                          wasm + Canvas 2D 原型（含 bench 路径）
 tools/{bench_native,memreport,snapshotimg,genepub}  开发工具，不属于库

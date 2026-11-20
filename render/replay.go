@@ -1,6 +1,6 @@
 package render
 
-import "github.com/laix/layx/render/paint"
+import "github.com/laic7092/layx/render/paint"
 
 // visibleRect reports the optional visible region of p. A painter that does not
 // implement paint.Clipped is never culled, so the zero value of the old

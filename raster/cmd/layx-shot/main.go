@@ -13,9 +13,9 @@ import (
 	"os"
 	"strings"
 
-	"github.com/laix/layx/raster"
-	"github.com/laix/layx/render"
-	"github.com/laix/layx/render/paint"
+	"github.com/laic7092/layx/raster"
+	"github.com/laic7092/layx/render"
+	"github.com/laic7092/layx/render/paint"
 )
 
 const sampleText = `The quick brown fox jumps over the lazy dog. Pack my box with five dozen liquor jugs.

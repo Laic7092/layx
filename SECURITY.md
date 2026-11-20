@@ -16,8 +16,8 @@ supported; older minor versions do not receive security fixes.
 
 | Module | Supported version |
 | --- | --- |
-| `github.com/laix/layx/render` | latest `v0.x` release |
-| `github.com/laix/layx/epub` | latest `epub/v0.x` release (tagged separately) |
+| `github.com/laic7092/layx/render` | latest `v0.x` release |
+| `github.com/laic7092/layx/epub` | latest `epub/v0.x` release (tagged separately) |
 
 The two modules are released together and must be upgraded together when a
 security fix spans both.

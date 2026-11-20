@@ -7,7 +7,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/laix/layx/render/paint"
+	"github.com/laic7092/layx/render/paint"
 )
 
 // wrappedDocument builds one chapter whose entire body is a single block of

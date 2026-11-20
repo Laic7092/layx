@@ -48,7 +48,7 @@ go test ./...         # root module, workspace mode
 ```
 
 `go.work` is a development convenience. The two modules are published
-independently: `epub/go.mod` must keep naming a real `github.com/laix/layx`
+independently: `epub/go.mod` must keep naming a real `github.com/laic7092/layx`
 version and must not carry a local `replace`, and the root module must keep
 building with Go 1.21 in plain module mode (`GOWORK=off`), which CI checks in
 its `go-min` job.

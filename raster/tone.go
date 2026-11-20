@@ -3,7 +3,7 @@ package raster
 import (
 	"math"
 
-	"github.com/laix/layx/render/paint"
+	"github.com/laic7092/layx/render/paint"
 )
 
 // Tone is an ink correction for glyph coverage: the table from the coverage a

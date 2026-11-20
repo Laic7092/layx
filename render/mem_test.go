@@ -5,7 +5,7 @@ import (
 	"runtime"
 	"testing"
 
-	"github.com/laix/layx/render/paint"
+	"github.com/laic7092/layx/render/paint"
 )
 
 // liveBytes returns the heap that is live after a collection.

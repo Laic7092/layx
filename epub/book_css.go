@@ -5,7 +5,7 @@ import (
 	"path"
 	"strings"
 
-	"github.com/laix/layx/render"
+	"github.com/laic7092/layx/render"
 )
 
 // styleRef is one place a chapter gets author CSS from: a linked stylesheet or

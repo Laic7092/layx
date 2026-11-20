@@ -13,7 +13,7 @@ them in lockstep.
 
 ### Added
 
-- **`raster/` — `github.com/laix/layx/raster`, the reference software rasterizer**
+- **`raster/` — `github.com/laic7092/layx/raster`, the reference software rasterizer**
   (tags `raster/v0.x.y`), now a nested module at the same level as `epub/`.
   It implements `paint.Painter` into an `*image.RGBA` with exact-area coverage
   integration, clipping masks, glyph outlines and the ink `Tone` curve, so a
@@ -118,7 +118,7 @@ drove them (`docs/audit.md`).
   highest adoption cost. Test fonts keep their own license next to the data
   (`render/testdata/DejaVu-LICENSE.txt`).
 - **`epub` is installable**: `epub/go.mod` no longer contains a local
-  `replace`, and requires a real `github.com/laix/layx` version (audit §2.3.2,
+  `replace`, and requires a real `github.com/laic7092/layx` version (audit §2.3.2,
   §6.5). The module is published with tags (`v0.x.y`, `epub/v0.x.y`).
 - **CI added** (`.github/workflows`, audit §2.3.3, §6.1): `gofmt`/`go vet`/unit
   tests, `-race` on Linux, tests on Windows/macOS, a cross-build matrix

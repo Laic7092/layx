@@ -5,7 +5,7 @@ import (
 	"image/color"
 	"math"
 
-	"github.com/laix/layx/render/paint"
+	"github.com/laic7092/layx/render/paint"
 )
 
 // DrawImage implements paint.Painter.

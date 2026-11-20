@@ -6,7 +6,7 @@ import (
 	"strings"
 	"unicode"
 
-	"github.com/laix/layx/render"
+	"github.com/laic7092/layx/render"
 )
 
 // This file is a small CSS reader for EPUB content: a stylesheet parser, a

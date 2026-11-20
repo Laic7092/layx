@@ -16,8 +16,8 @@ import (
 	"time"
 
 	"github.com/go-text/typesetting/font"
-	"github.com/laix/layx/render"
-	"github.com/laix/layx/render/paint"
+	"github.com/laic7092/layx/render"
+	"github.com/laic7092/layx/render/paint"
 )
 
 const (
@@ -235,7 +235,7 @@ func buildDocument(base, lineHeight float32, pal palette) (*render.Document, []s
 
 	link := b.block(styleBody,
 		b.text(0, "源码在 ", ""),
-		b.text(styleLink, "GitHub", "https://github.com/laix/layx"),
+		b.text(styleLink, "GitHub", "https://github.com/laic7092/layx"),
 		b.text(0, "，最小示例在 examples/layout。", ""),
 	)
 	add(link)

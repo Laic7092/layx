@@ -8,7 +8,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/go-text/typesetting/language"
-	"github.com/laix/layx/render/paint"
+	"github.com/laic7092/layx/render/paint"
 )
 
 // Location identifies a position inside a laid-out document.

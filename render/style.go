@@ -1,6 +1,6 @@
 package render
 
-import "github.com/laix/layx/render/paint"
+import "github.com/laic7092/layx/render/paint"
 
 // Slant selects an upright or italic face.
 type Slant uint8

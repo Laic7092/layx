@@ -1,4 +1,4 @@
-module github.com/laix/layx
+module github.com/laic7092/layx
 
 go 1.21
 

@@ -3,7 +3,7 @@ package raster
 import (
 	"math"
 
-	"github.com/laix/layx/render/paint"
+	"github.com/laic7092/layx/render/paint"
 )
 
 // point is a position in device pixels.

@@ -9,8 +9,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/laix/layx/render"
-	"github.com/laix/layx/render/paint"
+	"github.com/laic7092/layx/render"
+	"github.com/laic7092/layx/render/paint"
 )
 
 func buildTestLayout(t *testing.T, mode render.Mode) *render.Layout {

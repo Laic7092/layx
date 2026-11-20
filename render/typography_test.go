@@ -7,7 +7,7 @@ import (
 	"testing"
 
 	"github.com/go-text/typesetting/shaping"
-	"github.com/laix/layx/render/paint"
+	"github.com/laic7092/layx/render/paint"
 )
 
 // posPainter records glyph positions instead of drawing them.

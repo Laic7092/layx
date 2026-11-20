@@ -14,7 +14,7 @@ import (
 	"github.com/go-text/typesetting/di"
 	"github.com/go-text/typesetting/language"
 	"github.com/go-text/typesetting/shaping"
-	"github.com/laix/layx/render/paint"
+	"github.com/laic7092/layx/render/paint"
 	"golang.org/x/image/math/fixed"
 )
 

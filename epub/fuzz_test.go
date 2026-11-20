@@ -3,7 +3,7 @@ package epub
 import (
 	"testing"
 
-	"github.com/laix/layx/render"
+	"github.com/laic7092/layx/render"
 )
 
 // maxFuzzInput caps the bytes a fuzz body will process. The fuzzer can

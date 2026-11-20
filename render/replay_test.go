@@ -3,7 +3,7 @@ package render
 import (
 	"testing"
 
-	"github.com/laix/layx/render/paint"
+	"github.com/laic7092/layx/render/paint"
 )
 
 // clipPainter is a posPainter that also reports a visible region. It counts the

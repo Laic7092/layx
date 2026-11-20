@@ -63,7 +63,7 @@ _, err := eng.Layout(ctx, doc, render.LayoutOptions{
 //   go-text/typesetting/shaping.inclusiveGlyphRange  (wrapping.go:213)
 //   go-text/typesetting/shaping.cutRun              (wrapping.go:241)
 //   go-text/typesetting/shaping.(*LineWrapper).processBreakOption (wrapping.go:1228)
-//   ← github.com/laix/layx/render.(*textWorker).wrapParagraph (render/text.go:564)
+//   ← github.com/laic7092/layx/render.(*textWorker).wrapParagraph (render/text.go:564)
 ```
 
 实测命中矩阵（文本节点里含 `\n` 时）：
@@ -167,13 +167,13 @@ if first >= last || cf.count() == 0 {
 
    ```text
    require (
-       github.com/laix/layx v0.0.0
+       github.com/laic7092/layx v0.0.0
        golang.org/x/net v0.59.0
    )
-   replace github.com/laix/layx => ../
+   replace github.com/laic7092/layx => ../
    ```
 
-   依赖方的 replace 指令会被忽略，于是 `go get github.com/laix/layx/epub`
+   依赖方的 replace 指令会被忽略，于是 `go get github.com/laic7092/layx/epub`
    会去解析一个不存在的 `v0.0.0` → 直接失败。要可分发，必须：
 
    - 打 tag（`v0.x.y` 与 `epub/v0.x.y`），`epub/go.mod` 写真实版本、删掉 `replace`；
@@ -500,7 +500,7 @@ go test ./render -run '^$' -fuzz '^FuzzLayoutText$' -fuzztime 15s    # PASS
 ### 9.3 遗留与注意事项
 
 - **仓库 URL 与 module path 不一致**：`git remote` 是 `git@github.com:Laic7092/layx.git`，
-  而 module path 是 `github.com/laix/layx`。`go get github.com/laix/layx` 要求二者一致，
+  而 module path 是 `github.com/laic7092/layx`。`go get github.com/laic7092/layx` 要求二者一致，
   需要转移/改名仓库或加 vanity import；这属于仓库所有者的决定，未在代码中改动。
 - **增量追加章节**（§4 最后一条）没有新增 `append` 入口：按章懒加载已由
   `LayoutRange` + `Relayout`（保留范围、复用 break/page 缓存）覆盖；若需要真正的

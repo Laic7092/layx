@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/laix/layx/render/hyphen/en"
-	"github.com/laix/layx/render/paint"
+	"github.com/laic7092/layx/render/hyphen/en"
+	"github.com/laic7092/layx/render/paint"
 )
 
 var _ Hyphenator = en.New()

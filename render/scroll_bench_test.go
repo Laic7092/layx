@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/laix/layx/render/paint"
+	"github.com/laic7092/layx/render/paint"
 )
 
 func scrollBenchOptions(fs *FontSet, mode Mode) LayoutOptions {

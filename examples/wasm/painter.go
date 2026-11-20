@@ -10,7 +10,7 @@ import (
 
 	"github.com/go-text/typesetting/font"
 	ot "github.com/go-text/typesetting/font/opentype"
-	"github.com/laix/layx/render/paint"
+	"github.com/laic7092/layx/render/paint"
 )
 
 // canvasPainter implements paint.Painter on top of the Canvas 2D API.

@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/laix/layx/render/paint"
+	"github.com/laic7092/layx/render/paint"
 )
 
 func cjkBenchDoc(b testing.TB, totalRunes int) (*Document, *FontSet) {

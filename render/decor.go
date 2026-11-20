@@ -2,7 +2,7 @@ package render
 
 import (
 	"github.com/go-text/typesetting/font"
-	"github.com/laix/layx/render/paint"
+	"github.com/laic7092/layx/render/paint"
 )
 
 // faceFor finds the parsed face behind a paint.Font handle. A decoration uses

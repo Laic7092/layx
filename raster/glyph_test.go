@@ -7,7 +7,7 @@ import (
 	"testing"
 
 	"github.com/go-text/typesetting/font"
-	"github.com/laix/layx/render/paint"
+	"github.com/laic7092/layx/render/paint"
 )
 
 func testFontData(t testing.TB) []byte {

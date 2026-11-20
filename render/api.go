@@ -1,6 +1,6 @@
 package render
 
-import "github.com/laix/layx/render/paint"
+import "github.com/laic7092/layx/render/paint"
 
 // Aliases keep the common types reachable from the render package while the
 // paint package remains the low-level drawing contract.

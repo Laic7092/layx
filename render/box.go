@@ -3,7 +3,7 @@ package render
 import (
 	"sort"
 
-	"github.com/laix/layx/render/paint"
+	"github.com/laic7092/layx/render/paint"
 )
 
 // blockRect is one block's border box in chapter content coordinates. It is

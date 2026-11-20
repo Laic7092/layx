@@ -11,8 +11,8 @@ import (
 	"syscall/js"
 	"time"
 
-	"github.com/laix/layx/render"
-	"github.com/laix/layx/render/paint"
+	"github.com/laic7092/layx/render"
+	"github.com/laic7092/layx/render/paint"
 )
 
 // benchResult mirrors what ab.js needs for the A/B table. It is encoded by the

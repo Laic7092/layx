@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/laix/layx/render/paint"
+	"github.com/laic7092/layx/render/paint"
 )
 
 func scrollOptions(t testing.TB, mode Mode, tileHeight float32) LayoutOptions {

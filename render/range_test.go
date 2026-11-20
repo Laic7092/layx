@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/laix/layx/render/paint"
+	"github.com/laic7092/layx/render/paint"
 )
 
 // glyphsInRange keeps the glyphs whose document chapter is in [first, last).

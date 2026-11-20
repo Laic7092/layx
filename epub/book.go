@@ -17,7 +17,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/laix/layx/render"
+	"github.com/laic7092/layx/render"
 )
 
 // Chapter is one spine item: a title for the UI and the original XHTML.

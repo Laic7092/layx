@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/laix/layx/render"
+	"github.com/laic7092/layx/render"
 )
 
 // maxReportedIssues caps the diagnostic list of one Open or Build call, the

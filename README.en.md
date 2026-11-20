@@ -1,7 +1,7 @@
 # layx
 
 [![CI](https://github.com/Laic7092/layx/actions/workflows/ci.yml/badge.svg)](https://github.com/Laic7092/layx/actions/workflows/ci.yml)
-[![Go Reference](https://pkg.go.dev/badge/github.com/laix/layx/render.svg)](https://pkg.go.dev/github.com/laix/layx/render)
+[![Go Reference](https://pkg.go.dev/badge/github.com/laic7092/layx/render.svg)](https://pkg.go.dev/github.com/laic7092/layx/render)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 **English** · [中文](README.md)
@@ -38,8 +38,8 @@ are in [`docs/text-rules.md`](docs/text-rules.md) (Chinese). API reference:
 Two independently released modules; fetch only what you need:
 
 ```sh
-go get github.com/laix/layx/render@v0.1.0    # layout core (required)
-go get github.com/laix/layx/epub@v0.1.0      # EPUB/XHTML/CSS loader (optional)
+go get github.com/laic7092/layx/render@v0.1.0    # layout core (required)
+go get github.com/laic7092/layx/epub@v0.1.0      # EPUB/XHTML/CSS loader (optional)
 ```
 
 `epub` is a nested module, tagged as `epub/v0.x.y`; it requires a published
@@ -61,10 +61,10 @@ External consumers never see `go.work`; they resolve the released module version
 ## Packages
 
 ```text
-github.com/laix/layx/render             core: IR, fonts, layout, pagination, hit test, selection
-github.com/laix/layx/render/paint       drawing contract and basic types (no rasterizer)
-github.com/laix/layx/render/hyphen/en   optional TeX English hyphenation; the core does not import it
-github.com/laix/layx/epub               EPUB/XHTML/CSS → render.Document (nested module)
+github.com/laic7092/layx/render             core: IR, fonts, layout, pagination, hit test, selection
+github.com/laic7092/layx/render/paint       drawing contract and basic types (no rasterizer)
+github.com/laic7092/layx/render/hyphen/en   optional TeX English hyphenation; the core does not import it
+github.com/laic7092/layx/epub               EPUB/XHTML/CSS → render.Document (nested module)
 examples/layout                         minimal example: lay out and print page count
 examples/wasm                           wasm + Canvas 2D prototype (benchmark path included)
 tools/{bench_native,memreport,snapshotimg,genepub}   developer tools, not part of the library

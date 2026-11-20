@@ -7,8 +7,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/laix/layx/render"
-	"github.com/laix/layx/render/paint"
+	"github.com/laic7092/layx/render"
+	"github.com/laic7092/layx/render/paint"
 )
 
 // DefaultRuleColor paints horizontal rules and borders that name no colour.

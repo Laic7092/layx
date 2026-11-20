@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/laix/layx/render/paint"
+	"github.com/laic7092/layx/render/paint"
 )
 
 // cjkCandidates lists the CJK font files the tests try, in order, when

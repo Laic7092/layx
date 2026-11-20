@@ -1,10 +1,10 @@
 # layx API reference
 
 Quick reference for the public surface whose semantics are easiest to get wrong.
-It covers `render`, `render/paint` and the nested `github.com/laix/layx/epub`
+It covers `render`, `render/paint` and the nested `github.com/laic7092/layx/epub`
 module. The Chinese entry point is [`../README.md`](../README.md); the English one
 is [`../README.en.md`](../README.en.md). Full signatures and doc comments are on
-[pkg.go.dev](https://pkg.go.dev/github.com/laix/layx/render).
+[pkg.go.dev](https://pkg.go.dev/github.com/laic7092/layx/render).
 
 Layout code is the source of truth. This page documents the contract the code is
 expected to keep; a mismatch is a bug.
@@ -13,18 +13,18 @@ expected to keep; a mismatch is a bug.
 
 | Module | Import path | Tag | Minimum Go |
 |---|---|---|---|
-| layout core | `github.com/laix/layx/render` | `v0.x.y` | 1.21 |
-| drawing contract | `github.com/laix/layx/render/paint` | (in the root module) | 1.21 |
-| optional hyphenation | `github.com/laix/layx/render/hyphen/en` | (in the root module) | 1.21 |
-| EPUB loader | `github.com/laix/layx/epub` | `epub/v0.x.y` | 1.26 |
+| layout core | `github.com/laic7092/layx/render` | `v0.x.y` | 1.21 |
+| drawing contract | `github.com/laic7092/layx/render/paint` | (in the root module) | 1.21 |
+| optional hyphenation | `github.com/laic7092/layx/render/hyphen/en` | (in the root module) | 1.21 |
+| EPUB loader | `github.com/laic7092/layx/epub` | `epub/v0.x.y` | 1.26 |
 
 The two modules are released together and should be upgraded together. `epub`
 requires a published `render` version; there is no local `replace` in the
 published module.
 
 ```sh
-go get github.com/laix/layx/render@v0.1.0
-go get github.com/laix/layx/epub@v0.1.0
+go get github.com/laic7092/layx/render@v0.1.0
+go get github.com/laic7092/layx/epub@v0.1.0
 ```
 
 ## Request flow

@@ -5,7 +5,7 @@ import (
 	"image/color"
 	"testing"
 
-	"github.com/laix/layx/render/paint"
+	"github.com/laic7092/layx/render/paint"
 )
 
 func translate(dx, dy float32) paint.Affine {

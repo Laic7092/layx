@@ -3,7 +3,7 @@ package render
 import (
 	"time"
 
-	"github.com/laix/layx/render/paint"
+	"github.com/laic7092/layx/render/paint"
 )
 
 type drawOpKind uint8

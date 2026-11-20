@@ -7,24 +7,24 @@
 > content the converter drops (linearized tables, missing images, ignored ruby,
 > skipped CSS at-rules) are reported through `epub.Options.OnIssue` and
 > `Book.Issues`. Released as the nested module
-> `github.com/laix/layx/epub` (tags `epub/v0.x.y`) under the MIT license. The
+> `github.com/laic7092/layx/epub` (tags `epub/v0.x.y`) under the MIT license. The
 > English project entry point is [`../README.en.md`](../README.en.md).
 
 EPUB 解析层，独立 Go module：
 
 ```
-module github.com/laix/layx/epub
+module github.com/laic7092/layx/epub
 
 go 1.26.0
 ```
 
 它把一个 EPUB 文件读成章节，再把每章的 XHTML 转成
-[`github.com/laix/layx/render`](../render) 的 `render.Document`。
+[`github.com/laic7092/layx/render`](../render) 的 `render.Document`。
 
 安装：
 
 ```sh
-go get github.com/laix/layx/epub@v0.1.0
+go get github.com/laic7092/layx/epub@v0.1.0
 ```
 
 它 `require` 根 module 的已发布版本，没有 `replace`，可以直接被外部 module
@@ -323,7 +323,7 @@ painter 自己解码时也能拿到。
 ## 在别的 module 里使用
 
 ```sh
-go get github.com/laix/layx/epub@v0.1.0
+go get github.com/laic7092/layx/epub@v0.1.0
 ```
 
 依赖解析到已发布的 nested module（tag 形如 `epub/v0.x.y`），它自己 `require`

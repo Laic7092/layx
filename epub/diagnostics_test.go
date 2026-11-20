@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/laix/layx/render"
+	"github.com/laic7092/layx/render"
 )
 
 // testBook builds a minimal EPUB 3 archive for the diagnostics tests: chapters

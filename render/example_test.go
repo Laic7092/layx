@@ -11,8 +11,8 @@ import (
 	"log"
 	"os"
 
-	"github.com/laix/layx/render"
-	"github.com/laix/layx/render/paint"
+	"github.com/laic7092/layx/render"
+	"github.com/laic7092/layx/render/paint"
 )
 
 // Example is the smallest end-to-end layout: load a font, build a one-paragraph

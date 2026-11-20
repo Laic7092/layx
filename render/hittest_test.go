@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/laix/layx/render/paint"
+	"github.com/laic7092/layx/render/paint"
 )
 
 // TestHitTestUnifiedPaged checks that Layout.HitTest and Page.HitTest agree on

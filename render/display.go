@@ -3,7 +3,7 @@ package render
 import (
 	"context"
 
-	"github.com/laix/layx/render/paint"
+	"github.com/laic7092/layx/render/paint"
 )
 
 // linePaint is one line's contribution to a display list. Building it does not

@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/laix/layx/render/paint"
+	"github.com/laic7092/layx/render/paint"
 )
 
 // FuzzLayoutText is the audit §2.3.4 fuzz target: untrusted text must never

@@ -28,7 +28,7 @@ func TestCoreImports(t *testing.T) {
 		"golang.org/x/net/html",
 		// The rasterizer lives in its own module one level up; the core must
 		// keep producing display lists, not pixels.
-		"github.com/laix/layx/raster",
+		"github.com/laic7092/layx/raster",
 	}
 	imports := strings.Fields(string(out))
 	for _, imp := range imports {

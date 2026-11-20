@@ -3,7 +3,7 @@ package raster
 import (
 	"math"
 
-	"github.com/laix/layx/render/paint"
+	"github.com/laic7092/layx/render/paint"
 )
 
 // edge is one side of a contour, already in device space. dir is +1 for a

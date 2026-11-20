@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/laix/layx/render/paint"
+	"github.com/laic7092/layx/render/paint"
 )
 
 // locForParaRune returns a Location pointing at absolute paragraph rune pos.

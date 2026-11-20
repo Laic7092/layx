@@ -24,7 +24,7 @@ import (
 	"image/draw"
 
 	"github.com/go-text/typesetting/font"
-	"github.com/laix/layx/render/paint"
+	"github.com/laic7092/layx/render/paint"
 )
 
 // Rasterizer draws a paint display list into an image.RGBA.

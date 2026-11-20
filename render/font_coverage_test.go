@@ -5,7 +5,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/laix/layx/render/paint"
+	"github.com/laic7092/layx/render/paint"
 )
 
 // TestFontSetCoverage is the §3.5 coverage contract: the queried set (DejaVu

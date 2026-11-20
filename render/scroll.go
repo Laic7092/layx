@@ -6,7 +6,7 @@ import (
 	"sort"
 	"time"
 
-	"github.com/laix/layx/render/paint"
+	"github.com/laic7092/layx/render/paint"
 )
 
 // Tile is one fixed-height slice of the continuous scroll flow.
